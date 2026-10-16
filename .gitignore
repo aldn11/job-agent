@@ -1,0 +1,20 @@
+# Credenciais e variações de ambiente (permite apenas o modelo genérico)
+.env*
+!.env.example
+
+# Ambiente Virtual e Cache do Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Banco de dados local e histórico
+jobs.db
+
+# Logs de execução
+*.log
+pipeline.log
+
+# Caixa de entrada temporária e backups
+inbox/
+wrapper-backup-*/
