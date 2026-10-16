@@ -1,4 +1,4 @@
-# Vargas — Job Screening Agent (v1.0.0) 🎯🤖
+# Vargas — Job Screening Agent (v1.0.0) 
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -9,7 +9,7 @@
 
 ---
 
-## 💡 Problem & Solution
+##  Problem & Solution
 
 ### The Problem
 Searching for relevant job opportunities requires manually screening hundreds of job postings per week. Most listings feature generic titles, misaligned requirements, unspecified work modes (hybrid/remote/on-site restrictions), or unrealistic experience demands. This manual process consumes hours every day and leads to decision fatigue.
@@ -17,13 +17,13 @@ Searching for relevant job opportunities requires manually screening hundreds of
 ### The Solution
 **Vargas** acts as an automated personal recruiter running 24/7 on a local server:
 1. **Filters Out Noise:** Automatically ingests LinkedIn job alerts and RSS feeds, applying regex pattern filtering, keyword inclusion/exclusion rules, and SHA-256 fingerprint deduplication.
-2. **Factual AI Extraction:** Sends raw job descriptions to a local agent (Hermes Agent / Gemini LLM) instructed under strict guidelines (ASD-STE100 technical English) to extract pure facts without hallucinations (mandatory requirements, nice-to-haves, location, seniority, and required language proficiency).
+2. **Factual AI Extraction:** Sends raw job descriptions to a local agent (Hermes Agent) instructed under strict guidelines (ASD-STE100 technical English) to extract pure facts without hallucinations (mandatory requirements, nice-to-haves, location, seniority, and required language proficiency).
 3. **Deterministic Score Calculation:** Applies a strict mathematical scoring formula in Python over the extracted facts, delivering deterministic match scores (0 to 100) and actionable verdicts (`APPLY`, `MAYBE`, or `SKIP`).
 4. **Real-Time Alerts:** Sends instant, formatted Telegram notifications for recommended openings, highlighting candidate strengths and interview risk flags.
 
 ---
 
-## 🏗️ System Architecture
+##  System Architecture
 
 ```text
  ┌────────────────────────┐      ┌─────────────────────────┐
@@ -67,7 +67,7 @@ Searching for relevant job opportunities requires manually screening hundreds of
 
 ---
 
-## 🛠️ How the Pipeline Works
+##  How the Pipeline Works
 
 1. **Multi-Source & Anonymous Ingestion:**
 * **`collector.py`**: Ingests public RSS feeds (e.g., We Work Remotely), applying inclusion/exclusion lists and text normalization.
@@ -100,7 +100,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 ---
 
-## 🔒 Security & Engineering Highlights
+##  Security & Engineering Highlights
 
 * **Decoupled Responsibilities:** The LLM is used strictly for natural language understanding and fact extraction. Numerical scoring and final verdicts are 100% governed by deterministic Python code.
 * **Prompt Injection Protection:** Job description text is isolated as untrusted data between `BEGIN` and `END` blocks. If prompt injection attempts are detected within a job listing, the system records `prompt_injection_detected: true` and downgrades the job.
@@ -109,7 +109,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 ---
 
-## 📁 Repository Structure
+##  Repository Structure
 
 ```text
 job-agent/
@@ -135,7 +135,7 @@ job-agent/
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### 1. Prerequisites
 
@@ -214,6 +214,6 @@ Add the following schedule:
 
 ---
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
