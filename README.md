@@ -19,7 +19,7 @@ Searching for relevant job opportunities requires manually screening hundreds of
 1. **Filters Out Noise:** Automatically ingests LinkedIn job alerts and RSS feeds, applying regex pattern filtering, keyword inclusion/exclusion rules, and SHA-256 fingerprint deduplication.
 2. **Factual AI Extraction:** Sends raw job descriptions to a local agent (Hermes Agent) instructed under strict guidelines (ASD-STE100 technical English) to extract pure facts without hallucinations (mandatory requirements, nice-to-haves, location, seniority, and required language proficiency).
 3. **Deterministic Score Calculation:** Applies a strict mathematical scoring formula in Python over the extracted facts, delivering deterministic match scores (0 to 100) and actionable verdicts (`APPLY`, `MAYBE`, or `SKIP`).
-4. **Real-Time Alerts:** Sends instant, formatted Telegram notifications for recommended openings, highlighting candidate strengths and interview risk flags.
+4. **Real-Time Alerts:** Sends formatted Telegram notifications for recommended openings, with a cover-letter draft attached for `APPLY` jobs.
 
 ---
 
@@ -56,11 +56,17 @@ Searching for relevant job opportunities requires manually screening hundreds of
                   │      wrapper.py      │ ── Deterministic Engine
                   │  (Score Calculation) │    (0-100 Score & Verdict)
                   └───────────┬──────────┘
-                              │ 'APPLY' & 'MAYBE' Jobs
+                              │ APPLY: Draft letter
+                              ▼
+                  ┌──────────────────────┐
+                  │  cover_letter.py     │ ◄── Private candidate profile
+                  │  (Draft only)        │
+                  └───────────┬──────────┘
+                              │ APPLY draft + APPLY/MAYBE alert
                               ▼
                   ┌──────────────────────┐
                   │ telegram_notify.py   │
-                  │   (Telegram Bot)     │
+                  │ (Alert + .txt file)  │
                   └──────────────────────┘
 
 ```
@@ -71,7 +77,9 @@ Searching for relevant job opportunities requires manually screening hundreds of
 
 1. **Multi-Source & Anonymous Ingestion:**
 * **`collector.py`**: Ingests public RSS feeds (e.g., We Work Remotely), applying inclusion/exclusion lists and text normalization.
-* **`email_collector.py`**: Connects via IMAP to read LinkedIn job alert emails, extracts job URLs, and performs anonymous public HTTP scraping (without cookies or user login) to prevent account flagging.
+* **`email_collector.py`**: Connects via IMAP to process all unread LinkedIn job alert emails, extracts job URLs, and performs anonymous public HTTP scraping (without cookies or user login). An email is marked as read only after its links are durably saved to SQLite.
+* The public listing's location and workplace-type metadata are appended to the job text when available. This gives the AI evidence to cite without granting it Internet access.
+* Links whose public pages are blocked, rate-limited, or lack a usable description stay in a `SCRAPE_PENDING` queue. Every due pending link is retried on later runs with exponential backoff. There is no per-run job count limit.
 
 
 2. **Persistence & Storage:**
@@ -90,11 +98,18 @@ Searching for relevant job opportunities requires manually screening hundreds of
 $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Seniority (15)} + \text{Location (15)} + \text{English (10)}$$
 
 
+* Location eligibility is decided in Python from an exact quote that must also occur in the ingested job text. Explicitly incompatible locations are rejected; missing or ambiguous location evidence forces `MAYBE`.
+* Incomplete evaluations and results without a numeric score stay pending and do not create Telegram alerts. URL-only inbox files are rejected before calling the AI.
+* Private location allowlists are configured with `ALLOWED_REMOTE_COUNTRIES` and `ALLOWED_ONSITE_LOCATIONS` in `.env`. Separate multiple values with semicolons. Keep personal location details out of the public repository.
 * Automatically triggers Hard Rejects if the job requires incompatible country residency, mandatory native language fluency, or excessive seniority.
 
+5. **Cover Letter Drafts:**
+* For `APPLY` jobs only, Vargas creates a job-specific cover letter in the language of the job posting using facts from the private candidate profile and the job description.
+* Drafts use placeholder contact details, are saved under the ignored `cover_letters/` directory, and are sent as a `.txt` document with the Telegram job alert.
+* Vargas prepares drafts only. It never submits an application or sends a message to an employer.
 
-5. **Telegram Notifications:**
-* Delivers immediate alerts to the user's mobile device via Telegram, including the match score, direct job link, and key match reasons.
+6. **Telegram Notifications:**
+* Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. Failed deliveries remain pending and are retried by the next pipeline run.
 
 
 
@@ -120,12 +135,15 @@ job-agent/
 ├── requirements.txt      # Locked Python dependencies
 ├── add_linkedin.py       # Terminal interactive CLI for manual job ingestion
 ├── collector.py          # RSS feed collector script
+├── cover_letter.py       # Vargas cover-letter draft generator for APPLY jobs
 ├── email_collector.py    # IMAP reader and anonymous LinkedIn scraper
 ├── list_jobs.py          # Terminal viewer for recommended jobs
+├── location_policy.py    # Deterministic private location eligibility rules
 ├── run_pipeline.py       # Main pipeline orchestrator
 ├── store.py              # SQLite persistence and database module
 ├── telegram_notify.py    # Telegram Bot notification module
 ├── wrapper.py            # Docker executor and Python deterministic scoring engine
+├── tests/                # Automated pipeline and feature tests
 └── templates/            # Generic agent rule templates
     ├── candidate.md      # Candidate profile template
     ├── criteria.md       # ASD-STE100 criteria and extraction rules
@@ -177,8 +195,10 @@ nano .env
 
 
 Fill in your Telegram Bot token, Chat ID, and IMAP email credentials.
+Set the private location allowlists in `.env`, for example by listing the countries accepted for remote work and the cities accepted for on-site or hybrid work. Do not commit these personal settings.
 5. **Configure Agent Files:**
 Copy the template files from `templates/` into your Hermes profile directory and customize `candidate.md` with your real background.
+Before using cover-letter generation, synchronize the updated `templates/SOUL.md` with the private active Vargas profile. Follow your existing backup, hash-verification, and immutable-file procedure. Keep the real candidate profile and generated `cover_letters/` drafts private.
 
 ### 3. Running the Pipeline
 
@@ -188,6 +208,8 @@ To run the complete pipeline manually:
 ./venv/bin/python run_pipeline.py
 
 ```
+
+The pipeline continues with other work after a stage fails, but exits with a non-zero status and prints the failed stages. This allows cron or a service monitor to detect incomplete runs. IMAP collection is reported as skipped when both email credentials are absent.
 
 To view all approved (`EVALUATED_APPLY`) jobs in your terminal:
 
