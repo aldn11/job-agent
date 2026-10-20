@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import store
@@ -210,6 +211,122 @@ class StoreRetryTests(unittest.TestCase):
         ).fetchone()
         db.close()
         self.assertEqual(status, "EVALUATED_MAYBE")
+
+    def test_new_migration_retires_backlog_with_missing_or_invalid_dates(self):
+        db = store.connect(self.db_path)
+        with db:
+            db.execute(
+                "DELETE FROM schema_migrations WHERE migration_id = ?",
+                ("retire-stale-pending-scrapes-v2",),
+            )
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status, scrape_attempts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "linkedin:null-date",
+                    "null-date",
+                    "linkedin",
+                    "https://www.linkedin.com/jobs/view/111",
+                    "Company",
+                    "Old role",
+                    "fp-null",
+                    None,
+                    "SCRAPE_PENDING",
+                    4,
+                ),
+            )
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status, scrape_attempts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "linkedin:invalid-date",
+                    "invalid-date",
+                    "linkedin",
+                    "https://www.linkedin.com/jobs/view/112",
+                    "Company",
+                    "Old role",
+                    "fp-invalid",
+                    "not-a-date",
+                    "SCRAPE_PENDING",
+                    4,
+                ),
+            )
+        db.close()
+
+        db = store.connect(self.db_path)
+        statuses = dict(
+            db.execute(
+                "SELECT id, status FROM jobs WHERE id IN ('null-date', 'invalid-date')"
+            ).fetchall()
+        )
+        db.close()
+        self.assertEqual(statuses["null-date"], "SCRAPE_UNAVAILABLE")
+        self.assertEqual(statuses["invalid-date"], "SCRAPE_UNAVAILABLE")
+
+    def test_backlog_migration_retires_repeatedly_failed_legacy_jobs(self):
+        db = store.connect(self.db_path)
+        with db:
+            db.execute(
+                "DELETE FROM schema_migrations WHERE migration_id = ?",
+                ("retire-stale-pending-scrapes-v2",),
+            )
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status, scrape_attempts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "linkedin:repeated-failure",
+                    "repeated-failure",
+                    "linkedin",
+                    "https://www.linkedin.com/jobs/view/114",
+                    "Company",
+                    "Role",
+                    "fp-retry",
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "SCRAPE_PENDING",
+                    4,
+                ),
+            )
+        db.close()
+
+        db = store.connect(self.db_path)
+        status, = db.execute(
+            "SELECT status FROM jobs WHERE id = ?", ("repeated-failure",)
+        ).fetchone()
+        db.close()
+        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
+
+    def test_new_jobs_with_recent_dates_remain_in_scrape_queue(self):
+        db = store.connect(self.db_path)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db.execute(
+            """INSERT INTO jobs
+               (key, id, source, url, company, title, fingerprint, first_seen, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "linkedin:fresh",
+                "fresh",
+                "linkedin",
+                "https://www.linkedin.com/jobs/view/113",
+                "Company",
+                "Fresh role",
+                "fp-fresh",
+                now,
+                "SCRAPE_PENDING",
+            ),
+        )
+        db.commit()
+        self.assertEqual(store.retire_stale_pending_scrapes(db), 0)
+        rows = db.execute(
+            "SELECT id, status FROM jobs WHERE id = ?", ("fresh",)
+        ).fetchall()
+        db.close()
+        self.assertEqual(rows, [("fresh", "SCRAPE_PENDING")])
 
 
 if __name__ == "__main__":

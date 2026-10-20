@@ -22,9 +22,6 @@ BASE_DIR = Path(__file__).parent
 INBOX_DIR = BASE_DIR / "inbox"
 DB_PATH = BASE_DIR / "jobs.db"
 MAX_HTML_BYTES = 5 * 1024 * 1024
-SCRAPE_MAX_AGE_DAYS = int(os.getenv("SCRAPE_MAX_AGE_DAYS", "30"))
-if SCRAPE_MAX_AGE_DAYS <= 0:
-    raise ValueError("SCRAPE_MAX_AGE_DAYS precisa ser maior que zero.")
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 EMAIL_USER = os.getenv("EMAIL_USER", "")
@@ -374,22 +371,11 @@ def queue_legacy_incomplete_linkedin_files(db):
 
 def process_pending_scrapes(db):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    stale_before = (
-        datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
-    ).isoformat(timespec="seconds")
-    with db:
-        expired = db.execute(
-            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
-               scrape_next_attempt = NULL,
-               scrape_last_error = 'Job exceeded the scraping age window.'
-               WHERE status = 'SCRAPE_PENDING'
-                 AND julianday(first_seen) < julianday(?)""",
-            (stale_before,),
-        ).rowcount
+    expired = store.retire_stale_pending_scrapes(db)
     if expired:
         print(
             f"[!] {expired} vaga(s) antigas encerradas sem novo scraping "
-            f"(mais de {SCRAPE_MAX_AGE_DAYS} dias)."
+            f"(mais de {store.SCRAPE_MAX_AGE_DAYS} dias ou sem data válida)."
         )
     rows = db.execute(
         """SELECT key, id, url, scrape_attempts FROM jobs

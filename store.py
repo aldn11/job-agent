@@ -106,7 +106,48 @@ def connect(path=DB_PATH):
             (migration_id, datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         db.commit()
+    stale_migration_id = "retire-stale-pending-scrapes-v2"
+    if not db.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (stale_migration_id,),
+    ).fetchone():
+        retired = retire_stale_pending_scrapes(db, include_failed_backlog=True)
+        db.execute(
+            "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+            (
+                stale_migration_id,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        db.commit()
+        if retired:
+            print(
+                f"[!] Migração: {retired} vaga(s) antigas ou sem data válida "
+                "foram retiradas da fila de scraping."
+            )
     return db
+
+
+def retire_stale_pending_scrapes(db, include_failed_backlog=False):
+    """Retire historical scrape work, including rows with unusable timestamps."""
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
+    ).isoformat(timespec="seconds")
+    with db:
+        return db.execute(
+            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
+               scrape_next_attempt = NULL,
+               scrape_last_error = 'Historical job exceeded the scraping age window or has no usable timestamp.'
+               WHERE status = 'SCRAPE_PENDING'
+                 AND (
+                     first_seen IS NULL
+                     OR trim(first_seen) = ''
+                     OR julianday(first_seen) IS NULL
+                     OR julianday(first_seen) < julianday(?)
+                     OR (? = 1 AND scrape_attempts >= 3)
+                 )""",
+            (cutoff, int(include_failed_backlog)),
+        ).rowcount
 
 
 def restore_legacy_evaluations_from_scrape_queue(db):
@@ -155,17 +196,7 @@ def restore_legacy_evaluations_from_scrape_queue(db):
                WHERE key = ?""",
             [(job_key,) for job_key in unavailable],
         )
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
-        ).isoformat(timespec="seconds")
-        db.execute(
-            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
-               scrape_next_attempt = NULL,
-               scrape_last_error = 'Historical job exceeded the scraping age window.'
-               WHERE status = 'SCRAPE_PENDING' AND evaluation IS NULL
-                 AND julianday(first_seen) < julianday(?)""",
-            (cutoff,),
-        )
+        retire_stale_pending_scrapes(db)
 
 
 def save_evaluation(short_id, evaluation_data, path=DB_PATH, notification_context=None):
