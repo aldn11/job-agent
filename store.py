@@ -42,7 +42,7 @@ def fingerprint(company, title):
 
 
 def connect(path=DB_PATH):
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(path, timeout=30)
     db.execute("""CREATE TABLE IF NOT EXISTS jobs (
         key TEXT PRIMARY KEY, id TEXT, source TEXT, url TEXT,
         company TEXT, title TEXT, fingerprint TEXT,
@@ -54,6 +54,10 @@ def connect(path=DB_PATH):
         ("scrape_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("scrape_last_error", "TEXT"),
         ("scrape_next_attempt", "TEXT"),
+        ("evaluation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("evaluation_last_error", "TEXT"),
+        ("evaluation_next_attempt", "TEXT"),
+        ("evaluation_lease_until", "TEXT"),
     )
     needs_scrape_migration = any(column not in columns for column, _ in scrape_columns)
     for column, definition in scrape_columns:
@@ -78,6 +82,10 @@ def connect(path=DB_PATH):
             db.execute(
                 f"ALTER TABLE notifications ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
             )
+    if "next_attempt_at" not in notification_columns:
+        db.execute("ALTER TABLE notifications ADD COLUMN next_attempt_at TEXT")
+    if "delivery_lease_until" not in notification_columns:
+        db.execute("ALTER TABLE notifications ADD COLUMN delivery_lease_until TEXT")
     if needs_scrape_migration:
         migrate_incomplete_linkedin_evaluations(db)
     return db
@@ -95,12 +103,19 @@ def migrate_incomplete_linkedin_evaluations(db):
             evaluation = json.loads(raw_evaluation)
         except (TypeError, json.JSONDecodeError):
             continue
+        if not isinstance(evaluation, dict):
+            continue
         score = evaluation.get("score")
         if (
             evaluation.get("info_status") == "INCOMPLETE"
-            or not isinstance(score, (int, float))
-            or isinstance(score, bool)
-            or not math.isfinite(score)
+            or (
+                evaluation.get("verdict") in ("APPLY", "MAYBE")
+                and (
+                    not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                    or not math.isfinite(score)
+                )
+            )
         ):
             pending_keys.append(job_key)
 
@@ -138,15 +153,45 @@ def save_evaluation(short_id, evaluation_data, path=DB_PATH, notification_contex
         )
         evaluation_is_incomplete = (
             evaluation_data.get("info_status") == "INCOMPLETE"
-            or not score_is_valid
         )
         status = "NEW" if evaluation_is_incomplete else f"EVALUATED_{verdict}"
+        retry_at = None
+        if evaluation_is_incomplete:
+            attempts_row = db.execute(
+                "SELECT evaluation_attempts FROM jobs WHERE key = ?", (job_key,)
+            ).fetchone()
+            attempts = attempts_row[0] + 1
+            delay_seconds = min(86400, 300 * (2 ** min(attempts - 1, 8)))
+            retry_at = (
+                datetime.now(timezone.utc).timestamp() + delay_seconds
+            )
+            retry_at = datetime.fromtimestamp(
+                retry_at, timezone.utc
+            ).isoformat(timespec="seconds")
         with db:
             db.execute(
-                "UPDATE jobs SET status = ?, evaluation = ? WHERE key = ?",
-                (status, payload, job_key),
+                """UPDATE jobs SET status = ?, evaluation = ?,
+                   evaluation_attempts = CASE WHEN ? THEN evaluation_attempts + 1 ELSE 0 END,
+                   evaluation_last_error = CASE WHEN ? THEN ? ELSE NULL END,
+                   evaluation_next_attempt = ?, evaluation_lease_until = NULL
+                   WHERE key = ?""",
+                (
+                    status,
+                    payload,
+                    int(evaluation_is_incomplete),
+                    int(evaluation_is_incomplete),
+                    "AI evaluation returned incomplete information."
+                    if evaluation_is_incomplete
+                    else None,
+                    retry_at,
+                    job_key,
+                ),
             )
-            if not evaluation_is_incomplete and verdict in ("APPLY", "MAYBE"):
+            if (
+                not evaluation_is_incomplete
+                and verdict in ("APPLY", "MAYBE")
+                and score_is_valid
+            ):
                 notification_data = dict(evaluation_data)
                 if notification_context:
                     notification_data.update(notification_context)
@@ -212,7 +257,14 @@ def pending_notifications(path=DB_PATH):
     try:
         return db.execute(
             """SELECT id, payload, alert_sent, letter_sent FROM notifications
-               WHERE status = 'PENDING' ORDER BY id"""
+               WHERE status = 'PENDING'
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                 AND (delivery_lease_until IS NULL OR delivery_lease_until <= ?)
+               ORDER BY id""",
+            (
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
         ).fetchall()
     finally:
         db.close()
@@ -226,7 +278,7 @@ def mark_notification_sent(notification_id, path=DB_PATH):
             db.execute(
                 """UPDATE notifications
                    SET status = 'SENT', alert_sent = 1, letter_sent = 1,
-                       sent_at = ?, last_error = NULL
+                       sent_at = ?, last_error = NULL, delivery_lease_until = NULL
                    WHERE id = ?""",
                 (now, notification_id),
             )
@@ -262,6 +314,9 @@ def mark_notification_letter_sent(notification_id, path=DB_PATH):
                    SET letter_sent = 1,
                        status = CASE WHEN alert_sent = 1 THEN 'SENT' ELSE status END,
                        sent_at = CASE WHEN alert_sent = 1 THEN ? ELSE sent_at END,
+                       delivery_lease_until = CASE
+                           WHEN alert_sent = 1 THEN NULL ELSE delivery_lease_until
+                       END,
                        last_error = NULL
                    WHERE id = ? AND status = 'PENDING'""",
                 (now, notification_id),
@@ -273,12 +328,168 @@ def mark_notification_letter_sent(notification_id, path=DB_PATH):
 def mark_notification_failed(notification_id, error, path=DB_PATH):
     db = connect(path)
     try:
+        row = db.execute(
+            "SELECT attempts FROM notifications WHERE id = ? AND status = 'PENDING'",
+            (notification_id,),
+        ).fetchone()
+        if row is None:
+            return
+        attempts = row[0] + 1
+        delay_seconds = min(86400, 60 * (2 ** min(attempts - 1, 10)))
+        next_attempt = (
+            datetime.now(timezone.utc).timestamp() + delay_seconds
+        )
+        next_attempt = datetime.fromtimestamp(
+            next_attempt, timezone.utc
+        ).isoformat(timespec="seconds")
         with db:
             db.execute(
-                """UPDATE notifications
-                   SET attempts = attempts + 1, last_error = ?
+                """UPDATE notifications SET attempts = ?, last_error = ?,
+                   next_attempt_at = ?, delivery_lease_until = NULL
                    WHERE id = ? AND status = 'PENDING'""",
-                (str(error)[:500], notification_id),
+                (attempts, str(error)[:500], next_attempt, notification_id),
+            )
+    finally:
+        db.close()
+
+
+def claim_notification(notification_id, lease_seconds, path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat(timespec="seconds")
+        lease_until = datetime.fromtimestamp(
+            now.timestamp() + lease_seconds, timezone.utc
+        ).isoformat(timespec="seconds")
+        with db:
+            cursor = db.execute(
+                """UPDATE notifications SET delivery_lease_until = ?
+                   WHERE id = ? AND status = 'PENDING'
+                     AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                     AND (delivery_lease_until IS NULL OR delivery_lease_until <= ?)""",
+                (lease_until, notification_id, now_text, now_text),
+            )
+            return cursor.rowcount == 1
+    finally:
+        db.close()
+
+
+def recover_expired_notifications(path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        rows = db.execute(
+            """SELECT id, attempts FROM notifications
+               WHERE status = 'PENDING' AND delivery_lease_until <= ?""",
+            (now,),
+        ).fetchall()
+        with db:
+            for notification_id, attempts_so_far in rows:
+                attempts = attempts_so_far + 1
+                delay_seconds = min(86400, 60 * (2 ** min(attempts - 1, 10)))
+                retry_at = datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp() + delay_seconds,
+                    timezone.utc,
+                ).isoformat(timespec="seconds")
+                db.execute(
+                    """UPDATE notifications SET attempts = ?, next_attempt_at = ?,
+                       last_error = 'Recovered expired delivery lease.',
+                       delivery_lease_until = NULL
+                       WHERE id = ? AND status = 'PENDING'
+                         AND delivery_lease_until <= ?""",
+                    (attempts, retry_at, notification_id, now),
+                )
+    finally:
+        db.close()
+
+
+def recover_expired_evaluations(path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        rows = db.execute(
+            """SELECT id, evaluation_attempts FROM jobs
+               WHERE status = 'EVALUATING'
+                 AND (evaluation_lease_until IS NULL OR evaluation_lease_until <= ?)""",
+            (now,),
+        ).fetchall()
+        with db:
+            for short_id, attempts_so_far in rows:
+                attempts = attempts_so_far + 1
+                delay_seconds = min(86400, 300 * (2 ** min(attempts - 1, 8)))
+                retry_at = datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp() + delay_seconds,
+                    timezone.utc,
+                ).isoformat(timespec="seconds")
+                db.execute(
+                    """UPDATE jobs SET status = 'NEW', evaluation_attempts = ?,
+                       evaluation_next_attempt = ?,
+                       evaluation_last_error = 'Recovered expired evaluation lease.',
+                       evaluation_lease_until = NULL
+                       WHERE id = ? AND status = 'EVALUATING'""",
+                    (attempts, retry_at, short_id),
+                )
+    finally:
+        db.close()
+
+
+def pending_evaluation_jobs(path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return db.execute(
+            """SELECT id FROM jobs WHERE status = 'NEW'
+               AND (evaluation_next_attempt IS NULL OR evaluation_next_attempt <= ?)
+               ORDER BY first_seen, id""",
+            (now,),
+        ).fetchall()
+    finally:
+        db.close()
+
+
+def claim_evaluation(short_id, lease_seconds, path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat(timespec="seconds")
+        lease_until = datetime.fromtimestamp(
+            now.timestamp() + lease_seconds, timezone.utc
+        ).isoformat(timespec="seconds")
+        with db:
+            cursor = db.execute(
+                """UPDATE jobs SET status = 'EVALUATING',
+                   evaluation_lease_until = ?
+                   WHERE id = ? AND status = 'NEW'
+                     AND (evaluation_next_attempt IS NULL OR evaluation_next_attempt <= ?)""",
+                (lease_until, short_id, now_text),
+            )
+            return cursor.rowcount == 1
+    finally:
+        db.close()
+
+
+def mark_evaluation_failed(short_id, error, path=DB_PATH):
+    db = connect(path)
+    try:
+        row = db.execute(
+            "SELECT evaluation_attempts FROM jobs WHERE id = ? AND status = 'EVALUATING'",
+            (short_id,),
+        ).fetchone()
+        if row is None:
+            return
+        attempts = row[0] + 1
+        delay_seconds = min(86400, 300 * (2 ** min(attempts - 1, 8)))
+        next_attempt = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + delay_seconds,
+            timezone.utc,
+        ).isoformat(timespec="seconds")
+        with db:
+            db.execute(
+                """UPDATE jobs SET status = 'NEW', evaluation_attempts = ?,
+                   evaluation_last_error = ?, evaluation_next_attempt = ?,
+                   evaluation_lease_until = NULL
+                   WHERE id = ? AND status = 'EVALUATING'""",
+                (attempts, str(error)[:500], next_attempt, short_id),
             )
     finally:
         db.close()

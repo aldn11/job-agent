@@ -16,6 +16,131 @@ DB_PATH = BASE_DIR / "jobs.db"
 
 HERMES_CONTAINER = os.getenv("HERMES_CONTAINER_NAME", "hermes")
 HERMES_PROFILE = os.getenv("HERMES_PROFILE", "vargas")
+HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
+if HERMES_TIMEOUT_SECONDS <= 0:
+    raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
+
+EVALUATION_FIELDS = {
+    "title", "company", "source", "url", "text_source", "info_status",
+    "work_mode", "location_text", "role_match", "location_evidence",
+    "years_required", "seniority_level", "english_level_required",
+    "spoken_english_emphasis", "pay_currency", "mandatory_requirements",
+    "nice_to_have", "hard_reject_flags", "prompt_injection_detected",
+    "red_flags", "reasons_pt", "gaps_pt", "interview_risks_pt",
+}
+
+
+def validate_evaluation_data(data: dict, job_text: str) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("A resposta de Vargas precisa ser um objeto JSON.")
+    missing = EVALUATION_FIELDS - data.keys()
+    unexpected = data.keys() - EVALUATION_FIELDS
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("campos ausentes: " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("campos inesperados: " + ", ".join(sorted(unexpected)))
+        raise ValueError("JSON da avaliação inválido (" + "; ".join(details) + ").")
+
+    string_fields = (
+        "title", "company", "source", "url", "text_source", "info_status",
+        "work_mode", "location_text", "role_match", "location_evidence",
+        "seniority_level", "english_level_required", "pay_currency",
+    )
+    if any(not isinstance(data[field], str) for field in string_fields):
+        raise ValueError("Campo textual com tipo inválido na avaliação.")
+    if not data["title"].strip() or not data["company"].strip() or not data["source"].strip():
+        raise ValueError("Título, empresa e fonte não podem estar vazios.")
+    header = job_text.split("JOB TEXT:", 1)[0]
+    source_url = re.search(r"(?m)^URL:\s*(\S+)\s*$", header)
+    if source_url and data["url"] != source_url.group(1):
+        raise ValueError("A URL da resposta não corresponde à vaga processada.")
+
+    enums = {
+        "text_source": {"pasted", "company_site", "search_snippet"},
+        "info_status": {"COMPLETE", "INCOMPLETE"},
+        "work_mode": {
+            "REMOTE_OPEN", "REMOTE_UNCLEAR", "REMOTE_RESTRICTED",
+            "ONSITE_ALLOWED", "ONSITE_OTHER", "UNKNOWN",
+        },
+        "role_match": {"STRONG", "PARTIAL", "WEAK"},
+        "seniority_level": {"JUNIOR", "MID", "SENIOR", "NOT_STATED"},
+        "english_level_required": {
+            "NONE", "B2_OR_LOWER", "C1_OR_HIGHER", "NATIVE", "NOT_STATED",
+        },
+        "pay_currency": {"USD", "OTHER", "NOT_STATED"},
+    }
+    for field, accepted in enums.items():
+        if data[field] not in accepted:
+            raise ValueError(f"Valor inválido para {field}.")
+
+    years = data["years_required"]
+    if years is not None and (
+        isinstance(years, bool) or not isinstance(years, int) or years < 0
+    ):
+        raise ValueError("years_required deve ser inteiro não negativo ou null.")
+    for field in ("spoken_english_emphasis", "prompt_injection_detected"):
+        if not isinstance(data[field], bool):
+            raise ValueError(f"{field} deve ser booleano.")
+
+    def validate_string_list(field):
+        value = data[field]
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"{field} deve ser uma lista de textos.")
+
+    for field in (
+        "hard_reject_flags", "red_flags", "reasons_pt", "gaps_pt",
+        "interview_risks_pt",
+    ):
+        validate_string_list(field)
+    allowed_hard_rejects = {
+        "LANGUAGE_REQUIRED", "CERTIFICATION_REQUIRED", "RESIDENCE_REQUIRED",
+        "SENIOR_ROLE", "UNPAID_OR_COMMISSION_ONLY", "SCAM_SIGNS",
+    }
+    if any(flag not in allowed_hard_rejects for flag in data["hard_reject_flags"]):
+        raise ValueError("hard_reject_flags contém um valor não reconhecido.")
+
+    mandatory = data["mandatory_requirements"]
+    if not isinstance(mandatory, list):
+        raise ValueError("mandatory_requirements deve ser uma lista.")
+    for item in mandatory:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"requirement", "status", "quote"}
+            or not isinstance(item["requirement"], str)
+            or not item["requirement"].strip()
+            or not isinstance(item["status"], str)
+            or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}
+            or not isinstance(item["quote"], str)
+            or not item["quote"].strip()
+            or item["quote"] not in job_text
+        ):
+            raise ValueError(
+                "Requisito obrigatório inválido ou citação ausente do texto da vaga."
+            )
+
+    nice_to_have = data["nice_to_have"]
+    if not isinstance(nice_to_have, list):
+        raise ValueError("nice_to_have deve ser uma lista.")
+    for item in nice_to_have:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"item", "status"}
+            or not isinstance(item["item"], str)
+            or not item["item"].strip()
+            or not isinstance(item["status"], str)
+            or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}
+        ):
+            raise ValueError("Item nice_to_have inválido.")
+
+    if data["location_evidence"] and data["location_evidence"] not in job_text:
+        raise ValueError("location_evidence não corresponde literalmente à vaga.")
+    if data["info_status"] == "COMPLETE" and len(job_text.strip()) < 100:
+        raise ValueError("A vaga é curta demais para uma avaliação completa.")
+    return data
 
 
 def extract_job_description(job_text: str) -> str:
@@ -24,7 +149,7 @@ def extract_job_description(job_text: str) -> str:
         raise ValueError("Arquivo sem a seção JOB TEXT; avaliação cancelada.")
     description = job_text.split(marker, 1)[1]
     description = description.split("\nPUBLIC PAGE METADATA:", 1)[0].strip()
-    if len(description) < 100:
+    if len(description) < 100 or len(description.split()) < 15:
         raise ValueError(
             "Descrição da vaga ausente ou curta demais; avaliação cancelada "
             "para evitar alerta sem conteúdo."
@@ -59,17 +184,26 @@ def run_vargas(job_file_path: Path) -> dict:
         "--run-budget", "180"
     ]
 
-    res = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True, check=True
-    )
+    try:
+        res = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=HERMES_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Vargas excedeu o timeout de {HERMES_TIMEOUT_SECONDS} segundos."
+        ) from error
 
     raw_output = res.stdout.strip()
-    match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-    if not match:
-        raise ValueError(f"Não foi possível localizar um JSON válido na resposta:\n{raw_output}")
-
-    json_str = re.sub(r",(\s*[}\]])", r"\1", match.group(0))
-    return json.loads(json_str)
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError as error:
+        raise ValueError("Vargas não retornou um único objeto JSON válido.") from error
+    return validate_evaluation_data(parsed, job_text)
 
 def calculate_score_and_verdict(vargas_data: dict, job_text: str = "") -> dict:
     hard_rejects = vargas_data.get("hard_reject_flags", [])
@@ -116,7 +250,8 @@ def calculate_score_and_verdict(vargas_data: dict, job_text: str = "") -> dict:
     pts_skills = max(0, pts_skills)
 
     seniority = vargas_data.get("seniority_level", "NOT_STATED")
-    years = vargas_data.get("years_required", 0) or 0
+    years = vargas_data.get("years_required")
+    years = years if isinstance(years, int) and not isinstance(years, bool) else 0
     pts_seniority = 15 if (seniority in ["JUNIOR", "MID", "NOT_STATED"] and years <= 4) else 5
 
     work_mode = vargas_data.get("work_mode", "")

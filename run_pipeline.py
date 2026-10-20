@@ -14,13 +14,16 @@ VENV_PYTHON = os.getenv("PYTHON_EXECUTABLE", str(sys.executable))
 INBOX_DIR = BASE_DIR / "inbox"
 WRAPPER_SCRIPT = BASE_DIR / "wrapper.py"
 DB_PATH = BASE_DIR / "jobs.db"
+HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
+if HERMES_TIMEOUT_SECONDS <= 0:
+    raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
 
-def run_stage(label, command, failures):
+def run_stage(label, command, failures, timeout=None):
     print(f"\n=== {label} ===")
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, timeout=timeout)
         return True
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"[!] Falha em {label}: {error}")
         failures.append(label)
         return False
@@ -29,6 +32,7 @@ def run_stage(label, command, failures):
 def run_pipeline():
     failures = []
     store.connect(DB_PATH).close()
+    store.recover_expired_evaluations(DB_PATH)
 
     run_stage(
         "1. EXECUTANDO COLETOR RSS (We Work Remotely)",
@@ -42,26 +46,47 @@ def run_pipeline():
     )
 
     print("\n=== 3. PROCESSANDO VAGAS PENDENTES NA CAIXA DE ENTRADA ===")
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        rows = conn.execute(
-            "SELECT id FROM jobs WHERE status = ?", ("NEW",)
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = store.pending_evaluation_jobs(DB_PATH)
 
     for (short_id,) in rows:
+        lease_seconds = HERMES_TIMEOUT_SECONDS + 600
+        if not store.claim_evaluation(short_id, lease_seconds, DB_PATH):
+            continue
         file_path = INBOX_DIR / f"{short_id}.txt"
         if file_path.exists():
             print(f"\n[+] Avaliando vaga ID: {short_id}...")
-            run_stage(
+            succeeded = run_stage(
                 f"Avaliação da vaga {short_id}",
                 [VENV_PYTHON, str(WRAPPER_SCRIPT), str(file_path), "--defer-notifications"],
                 failures,
+                timeout=HERMES_TIMEOUT_SECONDS + 120,
             )
+            if not succeeded:
+                store.mark_evaluation_failed(
+                    short_id,
+                    "O processo de avaliação falhou ou excedeu o timeout.",
+                    DB_PATH,
+                )
         else:
             print(f"[!] Arquivo de entrada não encontrado: {file_path}")
             failures.append(f"Arquivo ausente para a vaga {short_id}")
+            store.mark_evaluation_failed(
+                short_id, f"Arquivo de entrada ausente: {file_path}", DB_PATH
+            )
+
+    db = sqlite3.connect(DB_PATH)
+    try:
+        pending_evaluations = db.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('NEW', 'EVALUATING')"
+        ).fetchone()[0]
+    finally:
+        db.close()
+    if pending_evaluations:
+        print(
+            f"[!] {pending_evaluations} vaga(s) continuam na fila de avaliação "
+            "e serão tentadas novamente conforme o backoff."
+        )
+        failures.append("Vagas pendentes de avaliação")
 
     print("\n=== 4. ENVIANDO NOTIFICAÇÕES PENDENTES ===")
     from telegram_notify import deliver_pending_notifications

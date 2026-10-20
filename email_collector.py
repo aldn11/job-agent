@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import imaplib
 import email
+import json
 import time
 import urllib.request
 import re
@@ -13,16 +14,21 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 from dotenv import load_dotenv
 import store
+import url_policy
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).parent
 INBOX_DIR = BASE_DIR / "inbox"
 DB_PATH = BASE_DIR / "jobs.db"
+MAX_HTML_BYTES = 5 * 1024 * 1024
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 EMAIL_USER = os.getenv("EMAIL_USER", "")
 EMAIL_PASS = os.getenv("EMAIL_PASS", "")
+IMAP_TIMEOUT_SECONDS = int(os.getenv("IMAP_TIMEOUT_SECONDS", "120"))
+if IMAP_TIMEOUT_SECONDS <= 0:
+    raise ValueError("IMAP_TIMEOUT_SECONDS precisa ser maior que zero.")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -34,6 +40,31 @@ class ScrapeError(RuntimeError):
     def __init__(self, message, retry_after=0):
         super().__init__(message)
         self.retry_after = retry_after
+
+
+def _job_posting_description(soup):
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or script.get_text())
+        except (json.JSONDecodeError, TypeError, RecursionError):
+            continue
+        pending = [data]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, list):
+                pending.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            job_type = item.get("@type", [])
+            if isinstance(job_type, str):
+                job_type = [job_type]
+            if "JobPosting" in job_type and isinstance(item.get("description"), str):
+                return BeautifulSoup(
+                    item["description"], "html.parser"
+                ).get_text(separator="\n").strip()
+            pending.extend(item.values())
+    return ""
 
 
 def _retry_after_seconds(value):
@@ -55,12 +86,24 @@ def _retry_after_seconds(value):
 
 
 def fetch_public_job_text(url: str) -> dict:
+    try:
+        url_policy.validate_allowed_url(url, ("linkedin.com",))
+    except ValueError as error:
+        raise ScrapeError(str(error)) from None
     req = urllib.request.Request(url, headers=HEADERS)
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html = response.read().decode('utf-8', errors='ignore')
+            with url_policy.open_allowed_url(
+                req, timeout=20, allowed_domains=("linkedin.com",)
+            ) as response:
+                html = response.read(MAX_HTML_BYTES + 1).decode(
+                    "utf-8", errors="replace"
+                )
+                if len(html.encode("utf-8")) > MAX_HTML_BYTES:
+                    raise ScrapeError("A página excedeu o tamanho máximo permitido.")
             break
+        except ValueError as error:
+            raise ScrapeError(f"Redirecionamento bloqueado: {error}") from None
         except HTTPError as error:
             retry_after = _retry_after_seconds(
                 error.headers.get("Retry-After") if error.headers else None
@@ -103,17 +146,23 @@ def fetch_public_job_text(url: str) -> dict:
         location = location_tag.get_text(" ", strip=True) if location_tag else ""
         workplace_type = workplace_tag.get_text(" ", strip=True) if workplace_tag else ""
 
-        desc_box = (
-            soup.find('div', class_=re.compile(r'show-more-less-html__markup|description__text'))
-            or soup.find('section', class_=re.compile(r'description'))
+        desc_box = soup.select_one(
+            ".show-more-less-html__markup, .description__text, "
+            "[class*='description__text'], [class*='description']"
         )
-        if not desc_box:
-            raise ScrapeError("A página não apresentou um bloco reconhecível de descrição da vaga.")
-
-        description_text = desc_box.get_text(separator="\n").strip()
+        description_text = (
+            desc_box.get_text(separator="\n").strip() if desc_box else ""
+        )
         if len(description_text) < 100:
+            description_text = _job_posting_description(soup)
+        if len(description_text) < 100 or len(description_text.split()) < 15:
             raise ScrapeError("A descrição extraída é curta demais para avaliação.")
-        if re.search(r"captcha|security verification|unusual activity|access denied", description_text, re.I):
+        if re.search(
+            r"captcha|security verification|unusual activity|access denied|"
+            r"sign in to view|join linkedin",
+            description_text,
+            re.I,
+        ):
             raise ScrapeError("A resposta parece ser uma página de bloqueio, não uma descrição de vaga.")
 
         return {
@@ -155,7 +204,9 @@ def fetch_linkedin_emails():
             process_pending_scrapes(conn)
             return 0
 
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail = imaplib.IMAP4_SSL(
+            IMAP_SERVER, timeout=IMAP_TIMEOUT_SECONDS
+        )
         mail.login(EMAIL_USER, EMAIL_PASS)
         status, _ = mail.select("inbox")
         if status != "OK":
@@ -171,29 +222,59 @@ def fetch_linkedin_emails():
         else:
             print("Nenhum alerta não lido do LinkedIn encontrado.")
 
+        processed = 0
+        email_errors = []
         for e_id in email_ids:
-            fetch_status, msg_data = mail.fetch(e_id, "(BODY.PEEK[])")
-            if fetch_status != "OK":
-                raise RuntimeError(f"Falha ao buscar o e-mail IMAP {e_id.decode()}.")
-            parsed = False
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    msg = email.message_from_bytes(response_part[1])
-                    body = _message_html(msg)
-                    if body:
-                        parse_linkedin_jobs(body, conn)
-                        parsed = True
-            if not parsed:
-                raise RuntimeError(f"O e-mail IMAP {e_id.decode()} não contém corpo processável.")
-            conn.commit()
-            flag_status, _ = mail.store(e_id, "+FLAGS", "\\Seen")
-            if flag_status != "OK":
-                raise RuntimeError(f"Não foi possível marcar o e-mail {e_id.decode()} como lido.")
+            email_id = e_id.decode(errors="replace")
+            try:
+                fetch_status, msg_data = mail.fetch(e_id, "(BODY.PEEK[])")
+                if fetch_status != "OK":
+                    email_errors.append(f"Falha ao buscar o e-mail IMAP {email_id}.")
+                    continue
+                parsed = False
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
+                        body = _message_html(msg)
+                        if body:
+                            parse_linkedin_jobs(body, conn)
+                            parsed = True
+                if not parsed:
+                    email_errors.append(
+                        f"O e-mail IMAP {email_id} não contém corpo processável."
+                    )
+                    continue
+                conn.commit()
+                flag_status, _ = mail.store(e_id, "+FLAGS", "\\Seen")
+                if flag_status != "OK":
+                    email_errors.append(
+                        f"Não foi possível marcar o e-mail {email_id} como lido."
+                    )
+                    continue
+                processed += 1
+            except (
+                imaplib.IMAP4.error,
+                LookupError,
+                UnicodeError,
+                ValueError,
+                sqlite3.Error,
+            ) as error:
+                conn.rollback()
+                email_errors.append(
+                    f"Falha ao processar o e-mail IMAP {email_id}: {error}"
+                )
 
-        if email_ids:
-            print(f"[+] Links dos {len(email_ids)} e-mails persistidos; e-mails marcados como lidos.")
+        if processed:
+            print(f"[+] Links de {processed} e-mails persistidos; e-mails marcados como lidos.")
         process_pending_scrapes(conn)
-        return len(email_ids)
+        if email_errors:
+            for error in email_errors:
+                print(f"[!] {error}")
+            raise RuntimeError(
+                f"{len(email_errors)} e-mail(s) não puderam ser processados; "
+                "permanecem não lidos para nova tentativa."
+            )
+        return processed
     finally:
         conn.close()
         if mail is not None:
@@ -212,7 +293,16 @@ def parse_linkedin_jobs(html_content, db):
         url = link['href']
 
         if "linkedin.com/jobs/view" in url or "linkedin.com/comm/jobs/view" in url:
-            clean_url = url.split("?")[0].replace("/comm/", "/")
+            try:
+                url_policy.validate_allowed_url(url, ("linkedin.com",))
+            except ValueError:
+                print(f"[!] Link LinkedIn recusado por política de URL: {url[:200]}")
+                continue
+            parts = url_policy.urlsplit(url)
+            if not re.fullmatch(r"/(?:comm/)?jobs/view/[^/]+/?", parts.path):
+                continue
+            clean_url = parts._replace(query="", fragment="").geturl()
+            clean_url = clean_url.replace("/comm/", "/")
             key = store.job_key(clean_url)
             exists = db.execute(
                 "SELECT id, status FROM jobs WHERE key = ? OR url = ? LIMIT 1",
@@ -250,6 +340,17 @@ def queue_legacy_incomplete_linkedin_files(db):
     for key, short_id in rows:
         file_path = INBOX_DIR / f"{short_id}.txt"
         if not file_path.exists():
+            db.execute(
+                """UPDATE jobs SET status = 'SCRAPE_PENDING',
+                   scrape_next_attempt = ?, scrape_last_error = ?
+                   WHERE key = ?""",
+                (
+                    retry_at,
+                    "LinkedIn inbox file is missing; re-scrape queued.",
+                    key,
+                ),
+            )
+            print(f"[!] Arquivo ausente da vaga {short_id}; scraping reencaminhado.")
             continue
         job_text = file_path.read_text(encoding="utf-8")
         marker = "JOB TEXT:"

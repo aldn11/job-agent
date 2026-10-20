@@ -17,6 +17,9 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
+if HERMES_TIMEOUT_SECONDS <= 0:
+    raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
 BASE_DIR = Path(__file__).parent
 
 def send_telegram_alert(evaluation_data: dict):
@@ -140,7 +143,12 @@ def deliver_pending_notifications(db_path):
     import store
 
     failed = 0
+    store.recover_expired_notifications(db_path)
     for notification_id, payload, alert_sent, letter_sent in store.pending_notifications(db_path):
+        if not store.claim_notification(
+            notification_id, HERMES_TIMEOUT_SECONDS + 600, db_path
+        ):
+            continue
         try:
             notification = json.loads(payload)
             if notification.get("verdict") in ("APPLY", "MAYBE") and not notification.get("cover_letter"):

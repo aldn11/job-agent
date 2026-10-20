@@ -12,6 +12,9 @@ load_dotenv()
 
 HERMES_CONTAINER = os.getenv("HERMES_CONTAINER_NAME", "hermes")
 HERMES_PROFILE = os.getenv("HERMES_PROFILE", "vargas")
+HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
+if HERMES_TIMEOUT_SECONDS <= 0:
+    raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
 
 
 def generate_cover_letter(job_text: str, evaluation: dict) -> str:
@@ -46,20 +49,31 @@ def generate_cover_letter(job_text: str, evaluation: dict) -> str:
     ]
     try:
         result = subprocess.run(
-            command, input=prompt, capture_output=True, text=True, check=True
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=HERMES_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Vargas excedeu o timeout de {HERMES_TIMEOUT_SECONDS} segundos ao gerar a carta."
+        ) from error
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError("Falha ao gerar a carta com Vargas.") from error
     raw_output = result.stdout.strip()
-    raw_output = re.sub(r"^```(?:[a-zA-Z]+)?\s*|\s*```$", "", raw_output).strip()
-    match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-    if not match:
-        raise ValueError("Vargas não retornou o JSON da carta.")
+    if raw_output.startswith("```"):
+        raw_output = re.sub(
+            r"^```(?:[a-zA-Z]+)?\s*|\s*```$", "", raw_output
+        ).strip()
     try:
-        output = json.loads(match.group(0))
+        output = json.loads(raw_output)
     except json.JSONDecodeError as error:
         raise ValueError("Vargas retornou JSON inválido para a carta.") from error
-    letter = output.get("cover_letter")
+    if not isinstance(output, dict) or set(output) != {"cover_letter"}:
+        raise ValueError("Vargas retornou campos inválidos para a carta.")
+    letter = output["cover_letter"]
     if not isinstance(letter, str):
         raise ValueError("Resposta de Vargas não contém cover_letter textual.")
     letter = letter.strip()

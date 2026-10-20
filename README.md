@@ -77,9 +77,9 @@ Searching for relevant job opportunities requires manually screening hundreds of
 
 1. **Multi-Source & Anonymous Ingestion:**
 * **`collector.py`**: Ingests public RSS feeds (e.g., We Work Remotely), applying inclusion/exclusion lists and text normalization.
-* **`email_collector.py`**: Connects via IMAP to process all unread LinkedIn job alert emails, extracts job URLs, and performs anonymous public HTTP scraping (without cookies or user login). An email is marked as read only after its links are durably saved to SQLite.
+* **`email_collector.py`**: Connects via IMAP to process all unread LinkedIn job alert emails, extracts job URLs, and performs anonymous public HTTPS scraping (without cookies or user login). Only LinkedIn URLs are fetched; redirects outside LinkedIn are rejected. An email is marked as read only after its links are durably saved to SQLite.
 * The public listing's location and workplace-type metadata are appended to the job text when available. This gives the AI evidence to cite without granting it Internet access.
-* Links whose public pages are blocked, rate-limited, or lack a usable description stay in a `SCRAPE_PENDING` queue. Every due pending link is retried on later runs with exponential backoff. There is no per-run job count limit.
+* The RSS collector accepts only We Work Remotely URLs. Links whose public pages are blocked, rate-limited, or lack a usable description stay in a `SCRAPE_PENDING` queue. Extraction tries the page description and structured `JobPosting` data; results need a minimum usable text length. Every due pending link is retried on later runs with exponential backoff. There is no per-run job count limit.
 
 
 2. **Persistence & Storage:**
@@ -99,7 +99,9 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 
 * Location eligibility is decided in Python from an exact quote that must also occur in the ingested job text. Explicitly incompatible locations are rejected; missing or ambiguous location evidence forces `MAYBE`.
-* Incomplete evaluations and results without a numeric score stay pending and do not create Telegram alerts. URL-only inbox files are rejected before calling the AI.
+* The complete AI response is validated against the expected schema, enum values, types and exact job-text citations. Invalid, incomplete or malformed evaluations stay pending and do not create Telegram alerts. URL-only inbox files are rejected before calling the AI.
+* Every due `NEW` job is evaluated without a per-run limit. Jobs and Telegram notifications are atomically claimed in SQLite to prevent overlapping pipeline runs from processing the same item; expired claims are recovered, and failed/incomplete evaluations retry with exponential backoff and no maximum attempt count.
+* Hermes evaluation and cover-letter generation use `HERMES_TIMEOUT_SECONDS` (default: 1800 seconds); IMAP operations use `IMAP_TIMEOUT_SECONDS` (default: 120 seconds). Telegram delivery failures also retry with exponential backoff; confirmed message/document stages are not sent again. A crash after Telegram accepts a message but before Vargas records confirmation can still result in a duplicate after lease recovery.
 * Private location allowlists are configured with `ALLOWED_REMOTE_COUNTRIES` and `ALLOWED_ONSITE_LOCATIONS` in `.env`. Separate multiple values with semicolons. Keep personal location details out of the public repository.
 * Automatically triggers Hard Rejects if the job requires incompatible country residency, mandatory native language fluency, or excessive seniority.
 
@@ -209,7 +211,7 @@ To run the complete pipeline manually:
 
 ```
 
-The pipeline continues with other work after a stage fails, but exits with a non-zero status and prints the failed stages. This allows cron or a service monitor to detect incomplete runs. IMAP collection is reported as skipped when both email credentials are absent.
+The pipeline continues with other work after a stage fails, but exits with a non-zero status and prints the failed stages. This allows cron or a service monitor to detect incomplete runs. IMAP collection is reported as skipped when both email credentials are absent. Jobs waiting for their backoff interval remain persisted and are retried on subsequent runs.
 
 To view all approved (`EVALUATED_APPLY`) jobs in your terminal:
 

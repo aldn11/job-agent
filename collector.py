@@ -6,6 +6,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from dotenv import load_dotenv
+import url_policy
 
 load_dotenv()
 
@@ -21,6 +22,7 @@ FEED = os.getenv(
     "https://weworkremotely.com/categories/remote-customer-support-jobs.rss"
 )
 USER_AGENT = os.getenv("USER_AGENT_HTTP", "job-agent/1.0 (personal open-source project)")
+MAX_FEED_BYTES = 10 * 1024 * 1024
 
 INCLUDE = [
     "technical support", "support specialist", "support agent",
@@ -35,9 +37,15 @@ EXCLUDE = [
 ]
 
 def fetch(url):
+    url_policy.validate_allowed_url(url, ("weworkremotely.com",))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read()
+    with url_policy.open_allowed_url(
+        req, timeout=20, allowed_domains=("weworkremotely.com",)
+    ) as resp:
+        payload = resp.read(MAX_FEED_BYTES + 1)
+        if len(payload) > MAX_FEED_BYTES:
+            raise ValueError("O feed RSS excedeu o tamanho máximo permitido.")
+        return payload
 
 def clean(text):
     text = html.unescape(text or "")
@@ -55,6 +63,10 @@ def parse(xml_bytes):
     for item in root.iter("item"):
         link = (item.findtext("link") or item.findtext("guid") or "").strip()
         if not link or link in jobs:
+            continue
+        try:
+            url_policy.validate_allowed_url(link, ("weworkremotely.com",))
+        except ValueError:
             continue
         jobs[link] = {
             "title": html.unescape((item.findtext("title") or "").strip()),
@@ -91,7 +103,8 @@ def main():
         company, role = split_title(job["title"])
         result, key = store.add_job(db, job["link"], company, role)
         counts[result] += 1
-        if result in ("new", "possible_duplicate"):
+        file_path = INBOX_DIR / f"{store.short_id(key)}.txt"
+        if result in ("new", "possible_duplicate") or not file_path.exists():
             note = "possible duplicate of a job seen before" if result == "possible_duplicate" else ""
             path = save_text(store.short_id(key), job, company, role, note)
             print(f"[{result}] {job['title']}\n   -> {path}")

@@ -91,6 +91,10 @@ class NotificationOutboxTests(unittest.TestCase):
                 )
         self.assertEqual(store.notification_counts(self.db_path)["PENDING"], 1)
         self.assertEqual(sent, ["alert"])
+        db = store.connect(self.db_path)
+        with db:
+            db.execute("UPDATE notifications SET next_attempt_at = NULL")
+        db.close()
 
         with (
             patch.object(telegram_notify, "send_telegram_alert") as send_alert,
@@ -323,6 +327,10 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertEqual(
                 telegram_notify.deliver_pending_notifications(self.db_path), 1
             )
+        db = store.connect(self.db_path)
+        with db:
+            db.execute("UPDATE notifications SET next_attempt_at = NULL")
+        db.close()
         with (
             patch.object(telegram_notify, "send_telegram_alert") as send_alert,
             patch.object(telegram_notify, "send_telegram_document"),

@@ -51,10 +51,10 @@ class EmailCollectorTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def read(self):
-                return page
+            def read(self, size=-1):
+                return page if size < 0 else page[:size]
 
-        with patch.object(email_collector.urllib.request, "urlopen", return_value=Response()):
+        with patch.object(email_collector.url_policy, "open_allowed_url", return_value=Response()):
             with self.assertRaises(email_collector.ScrapeError):
                 email_collector.fetch_public_job_text("https://www.linkedin.com/jobs/view/123")
 
@@ -82,14 +82,50 @@ class EmailCollectorTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def read(self):
-                return page
+            def read(self, size=-1):
+                return page if size < 0 else page[:size]
 
-        with patch.object(email_collector.urllib.request, "urlopen", return_value=Response()):
+        with patch.object(email_collector.url_policy, "open_allowed_url", return_value=Response()):
             result = email_collector.fetch_public_job_text("https://www.linkedin.com/jobs/view/123")
 
         self.assertEqual(result["location"], "Caruaru, Brazil")
         self.assertEqual(result["workplace_type"], "Remote")
+
+    def test_public_page_uses_job_posting_structured_description_fallback(self):
+        description = "Support users, document incidents, and resolve account issues. " * 5
+        page = f"""<html><body><h1>Support Specialist</h1>
+          <script type="application/ld+json">
+          {{"@type":"JobPosting","description":"{description}"}}
+          </script></body></html>""".encode()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=-1):
+                return page if size < 0 else page[:size]
+
+        with patch.object(
+            email_collector.url_policy, "open_allowed_url", return_value=Response()
+        ):
+            result = email_collector.fetch_public_job_text(
+                "https://www.linkedin.com/jobs/view/123"
+            )
+        self.assertIn("Support users", result["description"])
+
+    def test_external_redirect_is_rejected_and_remains_retryable(self):
+        with patch.object(
+            email_collector.url_policy,
+            "open_allowed_url",
+            side_effect=ValueError("URL fora da lista permitida."),
+        ):
+            with self.assertRaisesRegex(email_collector.ScrapeError, "Redirecionamento"):
+                email_collector.fetch_public_job_text(
+                    "https://www.linkedin.com/jobs/view/123"
+                )
 
     def test_scraped_metadata_is_appended_to_saved_job_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -190,6 +226,30 @@ class EmailCollectorTests(unittest.TestCase):
                     ("store", email_id, "+FLAGS", "\\Seen"),
                     imap.events,
                 )
+
+    def test_bad_email_does_not_block_later_unread_alerts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            imap = FakeImap()
+            responses = [("NO", [])] + [
+                ("OK", [(b"body", b"From: jobs@linkedin.com\r\n\r\nalert")])
+                for _ in range(6)
+            ]
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "secret"),
+                patch.object(email_collector, "DB_PATH", Path(temp_dir) / "jobs.db"),
+                patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
+                patch.object(email_collector, "parse_linkedin_jobs") as parse_mock,
+                patch.object(imap, "fetch", side_effect=responses),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 e-mail"):
+                    email_collector.fetch_linkedin_emails()
+
+            self.assertEqual(parse_mock.call_count, 6)
+            self.assertEqual(
+                len([event for event in imap.events if event[0] == "store"]), 6
+            )
 
 
 if __name__ == "__main__":
