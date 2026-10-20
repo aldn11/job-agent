@@ -64,10 +64,20 @@ def connect(path=DB_PATH):
         job_key TEXT NOT NULL UNIQUE,
         payload TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'PENDING',
+        alert_sent INTEGER NOT NULL DEFAULT 0,
+        letter_sent INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
         created_at TEXT NOT NULL,
         sent_at TEXT)""")
+    notification_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(notifications)").fetchall()
+    }
+    for column in ("alert_sent", "letter_sent"):
+        if column not in notification_columns:
+            db.execute(
+                f"ALTER TABLE notifications ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+            )
     if needs_scrape_migration:
         migrate_incomplete_linkedin_evaluations(db)
     return db
@@ -138,7 +148,7 @@ def save_evaluation(short_id, evaluation_data, path=DB_PATH, notification_contex
             )
             if not evaluation_is_incomplete and verdict in ("APPLY", "MAYBE"):
                 notification_data = dict(evaluation_data)
-                if verdict == "APPLY" and notification_context:
+                if notification_context:
                     notification_data.update(notification_context)
                 db.execute(
                     """INSERT INTO notifications
@@ -201,7 +211,7 @@ def pending_notifications(path=DB_PATH):
     db = connect(path)
     try:
         return db.execute(
-            """SELECT id, payload FROM notifications
+            """SELECT id, payload, alert_sent, letter_sent FROM notifications
                WHERE status = 'PENDING' ORDER BY id"""
         ).fetchall()
     finally:
@@ -215,8 +225,45 @@ def mark_notification_sent(notification_id, path=DB_PATH):
         with db:
             db.execute(
                 """UPDATE notifications
-                   SET status = 'SENT', sent_at = ?, last_error = NULL
+                   SET status = 'SENT', alert_sent = 1, letter_sent = 1,
+                       sent_at = ?, last_error = NULL
                    WHERE id = ?""",
+                (now, notification_id),
+            )
+    finally:
+        db.close()
+
+
+def mark_notification_alert_sent(notification_id, path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with db:
+            db.execute(
+                """UPDATE notifications
+                   SET alert_sent = 1,
+                       status = CASE WHEN letter_sent = 1 THEN 'SENT' ELSE status END,
+                       sent_at = CASE WHEN letter_sent = 1 THEN ? ELSE sent_at END,
+                       last_error = NULL
+                   WHERE id = ? AND status = 'PENDING'""",
+                (now, notification_id),
+            )
+    finally:
+        db.close()
+
+
+def mark_notification_letter_sent(notification_id, path=DB_PATH):
+    db = connect(path)
+    try:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with db:
+            db.execute(
+                """UPDATE notifications
+                   SET letter_sent = 1,
+                       status = CASE WHEN alert_sent = 1 THEN 'SENT' ELSE status END,
+                       sent_at = CASE WHEN alert_sent = 1 THEN ? ELSE sent_at END,
+                       last_error = NULL
+                   WHERE id = ? AND status = 'PENDING'""",
                 (now, notification_id),
             )
     finally:

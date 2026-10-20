@@ -185,7 +185,7 @@ if __name__ == "__main__":
 
     short_id = file_path.stem
     notification_context = None
-    if final_result.get("verdict") == "APPLY":
+    if final_result.get("verdict") in ("APPLY", "MAYBE"):
         notification_context = {
             "job_id": short_id,
             "job_text": job_text,

@@ -104,12 +104,12 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 * Automatically triggers Hard Rejects if the job requires incompatible country residency, mandatory native language fluency, or excessive seniority.
 
 5. **Cover Letter Drafts:**
-* For `APPLY` jobs only, Vargas creates a job-specific cover letter in the language of the job posting using facts from the private candidate profile and the job description.
-* Drafts use placeholder contact details, are saved under the ignored `cover_letters/` directory, and are sent as a `.txt` document with the Telegram job alert.
+* For every notified `APPLY` or `MAYBE` job, Vargas creates a job-specific cover letter in the language of the job posting using facts from the private candidate profile and the job description.
+* Drafts use placeholder contact details, are saved under the ignored `cover_letters/` directory, and are sent as a `.txt` document immediately after the full Telegram text alert.
 * Vargas prepares drafts only. It never submits an application or sends a message to an employer.
 
 6. **Telegram Notifications:**
-* Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. Failed deliveries remain pending and are retried by the next pipeline run.
+* Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. The full alert uses Telegram `sendMessage`; the cover-letter file is sent separately so Telegram caption limits cannot truncate the message. Failed delivery stages remain pending and are retried without resending stages already acknowledged by Telegram.
 
 
 

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,25 +67,44 @@ class NotificationOutboxTests(unittest.TestCase):
                 "title": "Support Agent",
                 "company": "Company",
                 "url": "https://example.com/job",
+                "cover_letter": "Dear hiring team. " * 10,
             },
             self.db_path,
+            notification_context={
+                "job_id": "short123",
+                "job_text": "JOB TEXT:\nA support role with real content. " * 10,
+            },
         )
+        sent = []
         with patch.object(
             telegram_notify,
             "send_telegram_alert",
-            side_effect=RuntimeError("temporary network error"),
+            side_effect=lambda payload: sent.append("alert"),
         ):
-            self.assertEqual(
-                telegram_notify.deliver_pending_notifications(self.db_path), 1
-            )
+            with patch.object(
+                telegram_notify,
+                "send_telegram_document",
+                side_effect=RuntimeError("temporary network error"),
+            ):
+                self.assertEqual(
+                    telegram_notify.deliver_pending_notifications(self.db_path), 1
+                )
         self.assertEqual(store.notification_counts(self.db_path)["PENDING"], 1)
+        self.assertEqual(sent, ["alert"])
 
-        with patch.object(
-            telegram_notify, "send_telegram_alert", return_value=True
+        with (
+            patch.object(telegram_notify, "send_telegram_alert") as send_alert,
+            patch.object(
+                telegram_notify,
+                "send_telegram_document",
+                side_effect=lambda payload: sent.append("letter"),
+            ),
         ):
             self.assertEqual(
                 telegram_notify.deliver_pending_notifications(self.db_path), 0
             )
+        send_alert.assert_not_called()
+        self.assertEqual(sent, ["alert", "letter"])
         self.assertEqual(store.notification_counts(self.db_path)["SENT"], 1)
 
     def test_missing_job_does_not_create_notification(self):
@@ -151,6 +171,9 @@ class NotificationOutboxTests(unittest.TestCase):
                     "send_telegram_alert",
                     side_effect=lambda payload: sent_payloads.append(payload.copy()),
                 ),
+                patch.object(
+                    telegram_notify, "send_telegram_document"
+                ) as document_sender,
             ):
                 self.assertEqual(
                     telegram_notify.deliver_pending_notifications(self.db_path), 0
@@ -163,9 +186,10 @@ class NotificationOutboxTests(unittest.TestCase):
             )
 
         self.assertEqual(sent_payloads[0]["cover_letter"], generated_letter)
+        document_sender.assert_called_once()
         self.assertEqual(store.notification_counts(self.db_path)["SENT"], 1)
 
-    def test_apply_telegram_alert_sends_cover_letter_as_document_captioned_with_job(self):
+    def test_alert_text_is_sent_in_full_in_a_text_message(self):
         class Response:
             def __enter__(self):
                 return self
@@ -177,12 +201,13 @@ class NotificationOutboxTests(unittest.TestCase):
                 return b'{"ok": true}'
 
         evaluation = {
-            "verdict": "APPLY",
+            "verdict": "MAYBE",
             "score": 90,
             "title": "Support Agent",
             "company": "Company",
             "url": "https://example.com/job",
-            "cover_letter": "Dear hiring team. " * 10,
+            "reasons_pt": ["Experiência prática em integração e suporte técnico " * 10],
+            "interview_risks_pt": ["Pode ser necessário demonstrar fluência oral " * 10],
         }
         with (
             patch.dict(
@@ -197,11 +222,117 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertTrue(telegram_notify.send_telegram_alert(evaluation))
 
         request = urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/sendMessage"))
+        message = urllib.parse.parse_qs(request.data.decode("utf-8"))["text"][0]
+        self.assertIn("Experiência prática em integração e suporte técnico " * 10, message)
+        self.assertIn("Pode ser necessário demonstrar fluência oral " * 10, message)
+        self.assertIn("Ver Anúncio da Vaga", message)
+
+    def test_cover_letter_document_is_sent_without_a_caption(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"TELEGRAM_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"},
+            ),
+            patch(
+                "telegram_notify.urllib.request.urlopen",
+                return_value=Response(),
+            ) as urlopen,
+        ):
+            self.assertTrue(
+                telegram_notify.send_telegram_document(
+                    {
+                        "job_id": "short123",
+                        "cover_letter": "Dear hiring team. " * 10,
+                    }
+                )
+            )
+
+        request = urlopen.call_args.args[0]
         self.assertTrue(request.full_url.endswith("/sendDocument"))
-        self.assertIn(b'name="caption"', request.data)
         self.assertIn(b'name="document"', request.data)
+        self.assertNotIn(b'name="caption"', request.data)
         self.assertIn(b"Dear hiring team", request.data)
-        self.assertIn(b"NOVA VAGA ENCONTRADA", request.data)
+
+    def test_maybe_delivery_also_generates_a_cover_letter(self):
+        store.save_evaluation(
+            "short123",
+            {
+                "verdict": "MAYBE",
+                "score": 80,
+                "title": "Support Agent",
+                "company": "Company",
+                "url": "https://example.com/job",
+            },
+            self.db_path,
+            notification_context={
+                "job_id": "short123",
+                "job_text": "JOB TEXT:\nA support role with real content. " * 10,
+            },
+        )
+        letter = "Dear hiring team. " * 10
+        with (
+            patch("cover_letter.generate_cover_letter", return_value=letter),
+            patch("cover_letter.save_cover_letter"),
+            patch.object(telegram_notify, "send_telegram_alert"),
+            patch.object(telegram_notify, "send_telegram_document") as send_document,
+        ):
+            self.assertEqual(
+                telegram_notify.deliver_pending_notifications(self.db_path), 0
+            )
+
+        send_document.assert_called_once()
+        self.assertEqual(send_document.call_args.args[0]["cover_letter"], letter)
+
+    def test_document_failure_does_not_resend_already_delivered_alert(self):
+        store.save_evaluation(
+            "short123",
+            {
+                "verdict": "MAYBE",
+                "score": 80,
+                "title": "Support Agent",
+                "company": "Company",
+                "url": "https://example.com/job",
+                "cover_letter": "Dear hiring team. " * 10,
+            },
+            self.db_path,
+        )
+        alert = []
+        with (
+            patch.object(
+                telegram_notify,
+                "send_telegram_alert",
+                side_effect=lambda payload: alert.append(payload),
+            ),
+            patch.object(
+                telegram_notify,
+                "send_telegram_document",
+                side_effect=RuntimeError("upload failed"),
+            ),
+        ):
+            self.assertEqual(
+                telegram_notify.deliver_pending_notifications(self.db_path), 1
+            )
+        with (
+            patch.object(telegram_notify, "send_telegram_alert") as send_alert,
+            patch.object(telegram_notify, "send_telegram_document"),
+        ):
+            self.assertEqual(
+                telegram_notify.deliver_pending_notifications(self.db_path), 0
+            )
+        send_alert.assert_not_called()
+        self.assertEqual(len(alert), 1)
+        self.assertEqual(store.notification_counts(self.db_path)["SENT"], 1)
 
     def test_failed_cover_letter_generation_keeps_apply_notification_pending(self):
         store.save_evaluation(
