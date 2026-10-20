@@ -104,7 +104,12 @@ def main():
         result, key = store.add_job(db, job["link"], company, role)
         counts[result] += 1
         file_path = INBOX_DIR / f"{store.short_id(key)}.txt"
-        if result in ("new", "possible_duplicate") or not file_path.exists():
+        status_row = db.execute(
+            "SELECT status FROM jobs WHERE key = ?", (key,)
+        ).fetchone()
+        if result in ("new", "possible_duplicate") or (
+            status_row and status_row[0] == "NEW" and not file_path.exists()
+        ):
             note = "possible duplicate of a job seen before" if result == "possible_duplicate" else ""
             path = save_text(store.short_id(key), job, company, role, note)
             print(f"[{result}] {job['title']}\n   -> {path}")

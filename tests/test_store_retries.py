@@ -128,8 +128,21 @@ class StoreRetryTests(unittest.TestCase):
                 "linkedin:incomplete",
                 "incomplete",
                 "linkedin",
-                "EVALUATED_MAYBE",
+                "SCRAPE_PENDING",
                 json.dumps({"verdict": "MAYBE", "info_status": "INCOMPLETE"}),
+            ),
+        )
+        db.execute(
+            """INSERT INTO jobs
+               (key, id, source, status, evaluation, first_seen)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "linkedin:old-pending",
+                "old-pending",
+                "linkedin",
+                "SCRAPE_PENDING",
+                None,
+                "2020-01-01T00:00:00+00:00",
             ),
         )
         db.commit()
@@ -143,6 +156,9 @@ class StoreRetryTests(unittest.TestCase):
         status, = db.execute(
             "SELECT status FROM jobs WHERE id = ?", ("incomplete",)
         ).fetchone()
+        old_status, = db.execute(
+            "SELECT status FROM jobs WHERE id = ?", ("old-pending",)
+        ).fetchone()
         db.close()
 
         self.assertTrue(
@@ -153,7 +169,47 @@ class StoreRetryTests(unittest.TestCase):
             {"alert_sent", "letter_sent", "next_attempt_at", "delivery_lease_until"}
             <= notification_columns
         )
-        self.assertEqual(status, "SCRAPE_PENDING")
+        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
+        self.assertEqual(old_status, "SCRAPE_UNAVAILABLE")
+
+    def test_legacy_schema_migration_restores_completed_evaluations(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy-complete.db"
+        db = sqlite3.connect(legacy_path)
+        db.executescript(
+            """CREATE TABLE jobs (
+                key TEXT PRIMARY KEY, id TEXT, source TEXT, url TEXT,
+                company TEXT, title TEXT, fingerprint TEXT, first_seen TEXT,
+                status TEXT DEFAULT 'NEW', evaluation TEXT
+            );
+            CREATE TABLE notifications (
+                id INTEGER PRIMARY KEY, job_key TEXT NOT NULL UNIQUE,
+                payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+                created_at TEXT NOT NULL, sent_at TEXT
+            );"""
+        )
+        db.execute(
+            """INSERT INTO jobs (key, id, source, status, evaluation)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "linkedin:complete",
+                "complete",
+                "linkedin",
+                "SCRAPE_PENDING",
+                json.dumps(
+                    {"verdict": "MAYBE", "score": 70, "info_status": "COMPLETE"}
+                ),
+            ),
+        )
+        db.commit()
+        db.close()
+
+        db = store.connect(legacy_path)
+        status, = db.execute(
+            "SELECT status FROM jobs WHERE id = ?", ("complete",)
+        ).fetchone()
+        db.close()
+        self.assertEqual(status, "EVALUATED_MAYBE")
 
 
 if __name__ == "__main__":

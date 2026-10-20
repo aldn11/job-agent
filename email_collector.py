@@ -22,6 +22,9 @@ BASE_DIR = Path(__file__).parent
 INBOX_DIR = BASE_DIR / "inbox"
 DB_PATH = BASE_DIR / "jobs.db"
 MAX_HTML_BYTES = 5 * 1024 * 1024
+SCRAPE_MAX_AGE_DAYS = int(os.getenv("SCRAPE_MAX_AGE_DAYS", "30"))
+if SCRAPE_MAX_AGE_DAYS <= 0:
+    raise ValueError("SCRAPE_MAX_AGE_DAYS precisa ser maior que zero.")
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 EMAIL_USER = os.getenv("EMAIL_USER", "")
@@ -37,9 +40,10 @@ HEADERS = {
 
 
 class ScrapeError(RuntimeError):
-    def __init__(self, message, retry_after=0):
+    def __init__(self, message, retry_after=0, permanent=False):
         super().__init__(message)
         self.retry_after = retry_after
+        self.permanent = permanent
 
 
 def _job_posting_description(soup):
@@ -121,6 +125,7 @@ def fetch_public_job_text(url: str) -> dict:
             raise ScrapeError(
                 f"LinkedIn retornou HTTP {error.code}.",
                 retry_after=retry_after,
+                permanent=error.code in (404, 410),
             ) from None
         except (URLError, TimeoutError, UnicodeError) as error:
             raise ScrapeError(f"Falha de rede ao acessar a vaga: {error}") from None
@@ -369,6 +374,23 @@ def queue_legacy_incomplete_linkedin_files(db):
 
 def process_pending_scrapes(db):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stale_before = (
+        datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
+    ).isoformat(timespec="seconds")
+    with db:
+        expired = db.execute(
+            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
+               scrape_next_attempt = NULL,
+               scrape_last_error = 'Job exceeded the scraping age window.'
+               WHERE status = 'SCRAPE_PENDING'
+                 AND julianday(first_seen) < julianday(?)""",
+            (stale_before,),
+        ).rowcount
+    if expired:
+        print(
+            f"[!] {expired} vaga(s) antigas encerradas sem novo scraping "
+            f"(mais de {SCRAPE_MAX_AGE_DAYS} dias)."
+        )
     rows = db.execute(
         """SELECT key, id, url, scrape_attempts FROM jobs
            WHERE status = 'SCRAPE_PENDING'
@@ -420,6 +442,17 @@ WORKPLACE TYPE: {job_data.get("workplace_type") or "Not found"}
             print(f"[+] Texto salvo e pronto para avaliação: {file_path}")
             time.sleep(2)
         except (ScrapeError, OSError, sqlite3.Error) as error:
+            if isinstance(error, ScrapeError) and error.permanent:
+                db.execute(
+                    """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
+                       scrape_attempts = scrape_attempts + 1,
+                       scrape_last_error = ?, scrape_next_attempt = NULL
+                       WHERE key = ? AND status = 'SCRAPE_PENDING'""",
+                    (str(error)[:500], key),
+                )
+                db.commit()
+                print(f"[!] Vaga indisponível permanentemente; retentativas encerradas: {error}")
+                continue
             next_attempts = attempts + 1
             delay_seconds = max(
                 min(86400, 300 * (2 ** min(attempts, 8))),

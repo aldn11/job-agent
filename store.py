@@ -3,12 +3,16 @@
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, parse_qs
 
 DB_PATH = "jobs.db"
+SCRAPE_MAX_AGE_DAYS = int(os.getenv("SCRAPE_MAX_AGE_DAYS", "30"))
+if SCRAPE_MAX_AGE_DAYS <= 0:
+    raise ValueError("SCRAPE_MAX_AGE_DAYS precisa ser maior que zero.")
 
 
 def job_key(url):
@@ -59,7 +63,6 @@ def connect(path=DB_PATH):
         ("evaluation_next_attempt", "TEXT"),
         ("evaluation_lease_until", "TEXT"),
     )
-    needs_scrape_migration = any(column not in columns for column, _ in scrape_columns)
     for column, definition in scrape_columns:
         if column not in columns:
             db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {definition}")
@@ -86,47 +89,83 @@ def connect(path=DB_PATH):
         db.execute("ALTER TABLE notifications ADD COLUMN next_attempt_at TEXT")
     if "delivery_lease_until" not in notification_columns:
         db.execute("ALTER TABLE notifications ADD COLUMN delivery_lease_until TEXT")
-    if needs_scrape_migration:
-        migrate_incomplete_linkedin_evaluations(db)
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+            migration_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )"""
+    )
+    migration_id = "restore-evaluated-jobs-from-legacy-scrape-backfill-v1"
+    if not db.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (migration_id,),
+    ).fetchone():
+        restore_legacy_evaluations_from_scrape_queue(db)
+        db.execute(
+            "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+            (migration_id, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+        db.commit()
     return db
 
 
-def migrate_incomplete_linkedin_evaluations(db):
+def restore_legacy_evaluations_from_scrape_queue(db):
+    """Undo the old schema-triggered backfill without discarding stored evaluations."""
     rows = db.execute(
         """SELECT key, evaluation FROM jobs
-           WHERE lower(source) = 'linkedin' AND status LIKE 'EVALUATED_%'
-             AND evaluation IS NOT NULL"""
+           WHERE status = 'SCRAPE_PENDING' AND evaluation IS NOT NULL"""
     ).fetchall()
-    pending_keys = []
+    restored = []
+    unavailable = []
     for job_key, raw_evaluation in rows:
         try:
             evaluation = json.loads(raw_evaluation)
         except (TypeError, json.JSONDecodeError):
+            unavailable.append(job_key)
             continue
         if not isinstance(evaluation, dict):
+            unavailable.append(job_key)
             continue
         score = evaluation.get("score")
-        if (
-            evaluation.get("info_status") == "INCOMPLETE"
-            or (
-                evaluation.get("verdict") in ("APPLY", "MAYBE")
-                and (
-                    not isinstance(score, (int, float))
-                    or isinstance(score, bool)
-                    or not math.isfinite(score)
-                )
-            )
-        ):
-            pending_keys.append(job_key)
-
-    if pending_keys:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.executemany(
-            """UPDATE jobs SET status = 'SCRAPE_PENDING',
-               scrape_next_attempt = ? WHERE key = ?""",
-            [(now, job_key) for job_key in pending_keys],
+        verdict = evaluation.get("verdict")
+        valid_score = (
+            isinstance(score, (int, float))
+            and not isinstance(score, bool)
+            and math.isfinite(score)
         )
-        db.commit()
+        if (
+            evaluation.get("info_status") != "INCOMPLETE"
+            and verdict in ("APPLY", "MAYBE", "SKIP")
+            and (valid_score or verdict == "SKIP")
+        ):
+            restored.append((f"EVALUATED_{verdict}", job_key))
+        else:
+            unavailable.append(job_key)
+
+    with db:
+        db.executemany(
+            """UPDATE jobs SET status = ?, scrape_next_attempt = NULL,
+               scrape_last_error = NULL WHERE key = ?""",
+            restored,
+        )
+        db.executemany(
+            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
+               scrape_next_attempt = NULL,
+               scrape_last_error = 'Legacy evaluation retained; automatic historical backfill disabled.'
+               WHERE key = ?""",
+            [(job_key,) for job_key in unavailable],
+        )
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
+        ).isoformat(timespec="seconds")
+        db.execute(
+            """UPDATE jobs SET status = 'SCRAPE_UNAVAILABLE',
+               scrape_next_attempt = NULL,
+               scrape_last_error = 'Historical job exceeded the scraping age window.'
+               WHERE status = 'SCRAPE_PENDING' AND evaluation IS NULL
+                 AND julianday(first_seen) < julianday(?)""",
+            (cutoff,),
+        )
 
 
 def save_evaluation(short_id, evaluation_data, path=DB_PATH, notification_context=None):

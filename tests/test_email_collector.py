@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import email_collector
 import store
@@ -126,6 +127,53 @@ class EmailCollectorTests(unittest.TestCase):
                 email_collector.fetch_public_job_text(
                     "https://www.linkedin.com/jobs/view/123"
                 )
+
+    def test_http_404_marks_scrape_unavailable_without_retrying(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = store.connect(":memory:")
+            alert = '<a href="https://www.linkedin.com/jobs/view/789">Job</a>'
+            with patch.object(email_collector, "INBOX_DIR", Path(temp_dir)):
+                email_collector.parse_linkedin_jobs(alert, db)
+                with patch.object(
+                    email_collector,
+                    "fetch_public_job_text",
+                    side_effect=email_collector.ScrapeError(
+                        "LinkedIn retornou HTTP 404.", permanent=True
+                    ),
+                ):
+                    email_collector.process_pending_scrapes(db)
+                status, attempts, next_attempt = db.execute(
+                    """SELECT status, scrape_attempts, scrape_next_attempt
+                       FROM jobs WHERE key = 'linkedin:789'"""
+                ).fetchone()
+            db.close()
+
+        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
+        self.assertEqual(attempts, 1)
+        self.assertIsNone(next_attempt)
+
+    def test_stale_pending_jobs_are_retired_before_fetch(self):
+        db = store.connect(":memory:")
+        _, key = store.add_job(
+            db,
+            "https://www.linkedin.com/jobs/view/987",
+            "Company",
+            "Role",
+            status="SCRAPE_PENDING",
+        )
+        db.execute(
+            "UPDATE jobs SET first_seen = '2020-01-01T00:00:00+00:00' WHERE key = ?",
+            (key,),
+        )
+        db.commit()
+        with patch.object(email_collector, "fetch_public_job_text") as fetch:
+            email_collector.process_pending_scrapes(db)
+        status, = db.execute(
+            "SELECT status FROM jobs WHERE key = ?", (key,)
+        ).fetchone()
+        db.close()
+        fetch.assert_not_called()
+        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
 
     def test_scraped_metadata_is_appended_to_saved_job_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -358,7 +358,7 @@ class NotificationOutboxTests(unittest.TestCase):
             )
         self.assertEqual(store.notification_counts(self.db_path)["PENDING"], 1)
 
-    def test_legacy_incomplete_linkedin_evaluation_is_queued_for_rescrape(self):
+    def test_schema_upgrade_does_not_backfill_old_incomplete_evaluations(self):
         db = store.connect(self.db_path)
         with db:
             db.execute(
@@ -377,13 +377,12 @@ class NotificationOutboxTests(unittest.TestCase):
             )
         db.close()
         db = store.connect(self.db_path)
-        store.migrate_incomplete_linkedin_evaluations(db)
         status, = db.execute(
             "SELECT status FROM jobs WHERE id = ?", ("short123",)
         ).fetchone()
         db.close()
 
-        self.assertEqual(status, "SCRAPE_PENDING")
+        self.assertEqual(status, "EVALUATED_MAYBE")
 
 
 if __name__ == "__main__":
