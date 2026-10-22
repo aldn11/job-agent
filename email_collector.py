@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import store
 import url_policy
+import remot_parser
 
 load_dotenv()
 
@@ -194,7 +195,7 @@ def _message_html(msg):
 
 
 def fetch_linkedin_emails():
-    print("=== BUSCANDO ALERTAS DO LINKEDIN NO E-MAIL ===")
+    print("=== BUSCANDO ALERTAS DO LINKEDIN E DO REMOT NO E-MAIL ===")
     mail = None
     conn = store.connect(DB_PATH)
     try:
@@ -202,7 +203,7 @@ def fetch_linkedin_emails():
         if not EMAIL_USER or not EMAIL_PASS:
             if EMAIL_USER or EMAIL_PASS:
                 raise RuntimeError("EMAIL_USER e EMAIL_PASS precisam ser configurados juntos.")
-            print("[SKIPPED] Coletor LinkedIn desativado: credenciais IMAP não configuradas.")
+            print("[SKIPPED] Coletor de e-mail desativado: credenciais IMAP não configuradas.")
             process_pending_scrapes(conn)
             return 0
 
@@ -214,18 +215,29 @@ def fetch_linkedin_emails():
         if status != "OK":
             raise RuntimeError("Não foi possível selecionar a caixa de entrada IMAP.")
 
-        status, messages = mail.search(None, "UNSEEN", "FROM", "linkedin.com")
-        if status != "OK":
-            raise RuntimeError("A busca por e-mails não lidos do LinkedIn falhou.")
-        email_ids = messages[0].split() if messages else []
+        email_ids = []
+        search_errors = []
+        for criteria in (
+            ("UNSEEN", "FROM", "linkedin.com"),
+            ("UNSEEN", "BODY", remot_parser.DOMAIN),
+        ):
+            status, messages = mail.search(None, *criteria)
+            if status != "OK":
+                search_errors.append(
+                    f"A busca IMAP por alertas ({' '.join(criteria[1:])}) falhou."
+                )
+                continue
+            if messages:
+                email_ids.extend(messages[0].split())
+        email_ids = list(dict.fromkeys(email_ids))
 
         if email_ids:
-            print(f"Encontrados {len(email_ids)} alertas não lidos do LinkedIn.")
+            print(f"Encontrados {len(email_ids)} e-mails não lidos para inspeção.")
         else:
-            print("Nenhum alerta não lido do LinkedIn encontrado.")
+            print("Nenhum e-mail de alerta não lido encontrado.")
 
         processed = 0
-        email_errors = []
+        email_errors = search_errors
         for e_id in email_ids:
             email_id = e_id.decode(errors="replace")
             try:
@@ -233,17 +245,18 @@ def fetch_linkedin_emails():
                 if fetch_status != "OK":
                     email_errors.append(f"Falha ao buscar o e-mail IMAP {email_id}.")
                     continue
-                parsed = False
+                parsed = 0
                 for response_part in msg_data:
                     if isinstance(response_part, tuple):
                         msg = email.message_from_bytes(response_part[1])
                         body = _message_html(msg)
                         if body:
-                            parse_linkedin_jobs(body, conn)
-                            parsed = True
+                            parsed += bool(parse_linkedin_jobs(body, conn))
+                            parsed += persist_remot_jobs(body, conn)
                 if not parsed:
                     email_errors.append(
-                        f"O e-mail IMAP {email_id} não contém corpo processável."
+                        f"O e-mail IMAP {email_id} não contém anúncio suportado; "
+                        "permanece não lido."
                     )
                     continue
                 conn.commit()
@@ -286,10 +299,47 @@ def fetch_linkedin_emails():
                 pass
 
 
+def persist_remot_jobs(body, db):
+    """Persist official Remōt links without evaluating title-only alerts."""
+    jobs = remot_parser.parse_remot_jobs(body)
+    for job in jobs:
+        result, key = store.add_job(
+            db,
+            job["url"],
+            job["company"],
+            job["title"],
+            status="DESCRIPTION_REQUIRED",
+            source=remot_parser.SOURCE_NAME,
+            application_url=job["application_url"],
+        )
+        if result == "seen":
+            db.execute(
+                """UPDATE jobs SET application_url = COALESCE(application_url, ?)
+                   WHERE key = ?""",
+                (job["application_url"], key),
+            )
+        else:
+            db.execute(
+                """UPDATE jobs SET scrape_last_error = ?
+                   WHERE key = ?""",
+                (
+                    "Alerta Remōt contém título e link, mas não descrição suficiente; "
+                    "adicione o texto da vaga manualmente.",
+                    key,
+                ),
+            )
+        print(
+            f"[!] Remot: anúncio persistido sem descrição suficiente "
+            f"({job['title']}); requer ingestão manual antes da avaliação."
+        )
+    return len(jobs)
+
+
 def parse_linkedin_jobs(html_content, db):
     soup = BeautifulSoup(html_content, 'html.parser')
     links = soup.find_all('a', href=True)
     count = 0
+    found = 0
 
     for link in links:
         url = link['href']
@@ -303,6 +353,7 @@ def parse_linkedin_jobs(html_content, db):
             parts = url_policy.urlsplit(url)
             if not re.fullmatch(r"/(?:comm/)?jobs/view/[^/]+/?", parts.path):
                 continue
+            found += 1
             clean_url = parts._replace(query="", fragment="").geturl()
             clean_url = clean_url.replace("/comm/", "/")
             key = store.job_key(clean_url)
@@ -332,6 +383,7 @@ def parse_linkedin_jobs(html_content, db):
 
     if count > 0:
         print(f"[+] {count} novos links persistidos para extração/repetição.")
+    return found
 
 
 def queue_legacy_incomplete_linkedin_files(db):
@@ -413,10 +465,7 @@ PUBLIC PAGE METADATA:
 LOCATION: {job_data.get("location") or "Not found"}
 WORKPLACE TYPE: {job_data.get("workplace_type") or "Not found"}
 """
-            file_path = INBOX_DIR / f"{short_id}.txt"
-            temp_path = file_path.with_suffix(".txt.tmp")
-            temp_path.write_text(file_content, encoding="utf-8")
-            temp_path.replace(file_path)
+            file_path = store.write_inbox_file(INBOX_DIR, short_id, file_content)
             db.execute(
                 """UPDATE jobs SET company = ?, title = ?, fingerprint = ?,
                    status = 'NEW',

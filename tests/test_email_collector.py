@@ -299,6 +299,97 @@ class EmailCollectorTests(unittest.TestCase):
                 len([event for event in imap.events if event[0] == "store"]), 6
             )
 
+    def test_remot_alert_is_committed_before_seen_and_waits_for_manual_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "jobs.db"
+            body = (
+                b"From: alerts@workremot.com\r\n"
+                b"Content-Type: text/html; charset=utf-8\r\n\r\n"
+                b'<a href="https://www.workremot.com/jobs/support?utm_source=mail">'
+                b"Support Specialist</a>"
+                b'<a href="https://apply.example/form">Apply now</a>'
+            )
+
+            class RemotImap:
+                def __init__(self, *args, **kwargs):
+                    self.events = []
+
+                def login(self, user, password):
+                    self.events.append(("login",))
+
+                def select(self, mailbox):
+                    return "OK", [b"1"]
+
+                def search(self, *args):
+                    self.events.append(("search", args))
+                    if "BODY" in args:
+                        return "OK", [b"1"]
+                    return "OK", [b""]
+
+                def fetch(self, email_id, query):
+                    return "OK", [(b"body", body)]
+
+                def store(self, email_id, operation, flag):
+                    check = store.connect(db_path)
+                    row = check.execute(
+                        """SELECT source, status, url, application_url
+                           FROM jobs"""
+                    ).fetchone()
+                    check.close()
+                    self.events.append(("store", row))
+                    self.persisted_row = row
+                    return "OK", []
+
+                def logout(self):
+                    return "BYE", []
+
+            imap = RemotImap()
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "password"),
+                patch.object(email_collector, "DB_PATH", db_path),
+            ):
+                processed = email_collector.fetch_linkedin_emails()
+
+            self.assertEqual(processed, 1)
+            self.assertEqual(
+                imap.persisted_row,
+                (
+                    "Remōt",
+                    "DESCRIPTION_REQUIRED",
+                    "https://workremot.com/jobs/support",
+                    "https://apply.example/form",
+                ),
+            )
+            db = store.connect(db_path)
+            status, error = db.execute(
+                "SELECT status, scrape_last_error FROM jobs"
+            ).fetchone()
+            db.close()
+            self.assertEqual(status, "DESCRIPTION_REQUIRED")
+            self.assertIn("manualmente", error)
+
+    def test_remot_duplicate_links_are_persisted_once(self):
+        db = store.connect(":memory:")
+        body = """
+        <a href="https://workremot.com/jobs/support?utm_source=mail">Support</a>
+        <a href="https://www.workremot.com/jobs/support?ref=email">Support</a>
+        """
+        try:
+            count = email_collector.persist_remot_jobs(body, db)
+            rows = db.execute(
+                "SELECT source, url, status FROM jobs"
+            ).fetchall()
+        finally:
+            db.close()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            rows,
+            [("Remōt", "https://workremot.com/jobs/support", "DESCRIPTION_REQUIRED")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

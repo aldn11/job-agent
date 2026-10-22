@@ -40,7 +40,7 @@ def run_pipeline():
         failures,
     )
     run_stage(
-        "2. EXECUTANDO COLETOR DE E-MAIL (LinkedIn Alerts)",
+        "2. EXECUTANDO COLETOR DE E-MAIL (LinkedIn e Remot)",
         [VENV_PYTHON, str(BASE_DIR / "email_collector.py")],
         failures,
     )

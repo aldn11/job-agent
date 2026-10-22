@@ -28,7 +28,7 @@ Searching for relevant job opportunities requires manually screening hundreds of
 ```text
  ┌────────────────────────┐      ┌─────────────────────────┐
  │   Email Job Alerts     │      │   Job RSS Feed Source   │
- │    (LinkedIn Jobs)     │      │   (We Work Remotely)    │
+ │ (LinkedIn / Remōt)     │      │   (We Work Remotely)    │
  └───────────┬────────────┘      └────────────┬────────────┘
              │ IMAP                           │ HTTP / RSS
              ▼                                ▼
@@ -77,7 +77,8 @@ Searching for relevant job opportunities requires manually screening hundreds of
 
 1. **Multi-Source & Anonymous Ingestion:**
 * **`collector.py`**: Ingests public RSS feeds (e.g., We Work Remotely), applying inclusion/exclusion lists and text normalization.
-* **`email_collector.py`**: Connects via IMAP to process all unread LinkedIn job alert emails, extracts job URLs, and performs anonymous public HTTPS scraping (without cookies or user login). Only LinkedIn URLs are fetched; redirects outside LinkedIn are rejected. An email is marked as read only after its links are durably saved to SQLite.
+* **`email_collector.py`**: Connects via IMAP to process unread LinkedIn and Remōt alert emails. LinkedIn URLs retain the existing anonymous public HTTPS scraping flow (without cookies or user login); redirects outside LinkedIn are rejected. Remōt links are accepted only from HTTPS `workremot.com` hosts (including its subdomains), normalized, and saved to SQLite. No Remōt page or external application URL is fetched. Emails are marked as read only after a supported listing URL is durably stored.
+* **Remōt alert format and description limit:** The repository does not contain a real Remōt alert sample or a verified email template. Its parser therefore finds official listing URLs in generic HTML or plain-text messages rather than assuming a specific sender or markup. Title/link-only alerts are stored as `DESCRIPTION_REQUIRED`, not placed in the evaluation inbox, and never sent to Vargas without job-description text. External links labeled as application links are stored separately for transparency when one listing and one application URL are unambiguous. Add the full job description (at least 100 characters and 15 words) with `python add_remot.py`; this promotes the saved alert to `NEW` and creates its inbox file. The Remōt alert's search is IMAP `UNSEEN BODY workremot.com`; providers that do not support standard IMAP `BODY` search may require a provider-specific query change.
 * The public listing's location and workplace-type metadata are appended to the job text when available. This gives the AI evidence to cite without granting it Internet access.
 * The RSS collector accepts only We Work Remotely URLs. Links whose public pages are blocked, rate-limited, or lack a usable description stay in a `SCRAPE_PENDING` queue. Extraction tries the page description and structured `JobPosting` data; results need a minimum usable text length. Transient failures retry on later runs with exponential backoff. Confirmed HTTP 404/410 responses become `SCRAPE_UNAVAILABLE` and are no longer retried. Entries older than `SCRAPE_MAX_AGE_DAYS` (default: 30) are also retired, since old job postings are unlikely to remain actionable. There is no per-run job count limit.
 * Schema upgrades do not backfill historical evaluated jobs into the scraping queue. A one-time repair restores their saved evaluation status and retires old unresolved entries (including legacy rows with at least three failed scrape attempts, missing/invalid dates, or age beyond the configured window) instead of triggering large batches of old requests. Newer transient failures continue retrying as before.
@@ -140,9 +141,11 @@ job-agent/
 ├── scripts/
 │   └── validate.py       # Syntax check and complete offline test suite
 ├── add_linkedin.py       # Terminal interactive CLI for manual job ingestion
+├── add_remot.py          # Manual description ingestion for saved Remōt alerts
 ├── collector.py          # RSS feed collector script
 ├── cover_letter.py       # Vargas cover-letter draft generator for APPLY jobs
 ├── email_collector.py    # IMAP reader and anonymous LinkedIn scraper
+├── remot_parser.py       # Conservative Remōt alert-link parser
 ├── list_jobs.py          # Terminal viewer for recommended jobs
 ├── location_policy.py    # Deterministic private location eligibility rules
 ├── run_pipeline.py       # Main pipeline orchestrator

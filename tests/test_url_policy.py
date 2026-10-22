@@ -11,6 +11,8 @@ class UrlPolicyTests(unittest.TestCase):
             "https://www.linkedin.com/jobs/view/123",
             "https://weworkremotely.com/remote-jobs/example",
             "https://www.weworkremotely.com/categories/jobs.rss",
+            "https://workremot.com/jobs/example",
+            "https://www.workremot.com/jobs/example",
         ):
             with self.subTest(url=url):
                 self.assertEqual(url_policy.validate_allowed_url(url), url)
@@ -22,6 +24,8 @@ class UrlPolicyTests(unittest.TestCase):
             "https://linkedin.com@attacker.example/jobs/view/123",
             "https://attacker.example/?next=https://linkedin.com",
             "https://linkedin.com:444/jobs/view/123",
+            "https://workremot.com.attacker.example/jobs/example",
+            "https://workremot.com@attacker.example/jobs/example",
         ):
             with self.subTest(url=url):
                 with self.assertRaises(ValueError):
