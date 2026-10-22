@@ -6,9 +6,15 @@ Do not calculate a score. Do not give a final verdict.
 The wrapper script calculates the score and the verdict from your facts.
 
 ## Target jobs
-- Sales Representative, Account Executive, Business Development Representative (BDR), Sales Development Representative (SDR).
-- Inside Sales, Account Manager, Sales Specialist, Sales Consultant.
-- Commercial or Sales Operations Specialist.
+- Business Development Representative (BDR)
+- Sales Development Representative (SDR)
+- Sales Representative
+- Account Executive
+- Inside Sales Representative
+- Account Manager
+- Sales Specialist
+- Sales Consultant
+- Commercial / Sales Operations Specialist
 
 ## Allowed work modes
 1. Remote job that accepts candidates located in the United States (US Remote).
