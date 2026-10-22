@@ -83,16 +83,13 @@ def keep(job):
     return any(word in title for word in INCLUDE)
 
 def save_text(short, job, company, role, note):
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    path = INBOX_DIR / f"{short}.txt"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(
-            f"SOURCE: We Work Remotely\nURL: {job['link']}\n"
-            f"COMPANY: {company}\nTITLE: {role}\n"
-            f"REGION (as listed): {job['region']}\n"
-            f"NOTE: {note}\n\nJOB TEXT:\n{job['description']}\n"
-        )
-    return path
+    content = (
+        f"SOURCE: We Work Remotely\nURL: {job['link']}\n"
+        f"COMPANY: {company}\nTITLE: {role}\n"
+        f"REGION (as listed): {job['region']}\n"
+        f"NOTE: {note}\n\nJOB TEXT:\n{job['description']}\n"
+    )
+    return store.write_inbox_file(INBOX_DIR, short, content)
 
 def main():
     jobs = parse(fetch(FEED))

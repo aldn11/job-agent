@@ -37,10 +37,7 @@ REGION (as listed): Remote / Unspecified
 JOB TEXT:
 {job_text}
 """
-    file_path = INBOX_DIR / f"{short_id}.txt"
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(file_content)
+    file_path = store.write_inbox_file(INBOX_DIR, short_id, file_content)
 
     conn = store.connect(DB_PATH)
     cursor = conn.cursor()

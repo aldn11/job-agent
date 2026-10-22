@@ -8,9 +8,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_TESTS = {
     "add_linkedin.py": "test_add_linkedin.py",
+    "add_remot.py": "test_add_remot.py",
     "collector.py": "test_collector.py",
     "cover_letter.py": "test_cover_letter.py",
     "email_collector.py": "test_email_collector.py",
+    "remot_parser.py": "test_remot_parser.py",
     "list_jobs.py": "test_list_jobs.py",
     "location_policy.py": "test_location_policy.py",
     "run_pipeline.py": "test_run_pipeline.py",

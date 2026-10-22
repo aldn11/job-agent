@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 DB_PATH = "jobs.db"
@@ -22,6 +23,9 @@ def job_key(url):
     path = p.path.rstrip("/")
     if host == "weworkremotely.com":
         return "wwr:" + path.split("/")[-1].lower()
+    if host == "workremot.com" or host.endswith(".workremot.com"):
+        query = "&".join(sorted(p.query.split("&"))) if p.query else ""
+        return "remot:" + path + (f"?{query}" if query else "")
     if host == "linkedin.com":
         m = re.search(r"/jobs/view/(?:[^/]*-)?(\d+)", path)
         if m:
@@ -39,6 +43,17 @@ def short_id(key):
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
+def write_inbox_file(inbox_dir, job_id, content):
+    """Atomically write a complete job description to the shared inbox."""
+    inbox_dir = Path(inbox_dir)
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    path = inbox_dir / f"{job_id}.txt"
+    temp_path = path.with_suffix(".txt.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+    return path
+
+
 def fingerprint(company, title):
     """Impressao digital empresa+titulo, para achar a mesma vaga em outra fonte."""
     text = re.sub(r"[^a-z0-9]+", " ", f"{company} {title}".lower()).strip()
@@ -50,10 +65,13 @@ def connect(path=DB_PATH):
     db.execute("""CREATE TABLE IF NOT EXISTS jobs (
         key TEXT PRIMARY KEY, id TEXT, source TEXT, url TEXT,
         company TEXT, title TEXT, fingerprint TEXT,
-        first_seen TEXT, status TEXT DEFAULT 'NEW', evaluation TEXT)""")
+        first_seen TEXT, status TEXT DEFAULT 'NEW', evaluation TEXT,
+        application_url TEXT)""")
     columns = {
         row[1] for row in db.execute("PRAGMA table_info(jobs)").fetchall()
     }
+    if "application_url" not in columns:
+        db.execute("ALTER TABLE jobs ADD COLUMN application_url TEXT")
     scrape_columns = (
         ("scrape_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("scrape_last_error", "TEXT"),
@@ -575,7 +593,7 @@ def notification_counts(path=DB_PATH):
         db.close()
 
 
-def add_job(db, url, company, title, status="NEW"):
+def add_job(db, url, company, title, status="NEW", source=None, application_url=None):
     """Devolve ('new' | 'seen' | 'possible_duplicate', chave)."""
     key = job_key(url)
     if db.execute("SELECT 1 FROM jobs WHERE key=?", (key,)).fetchone():
@@ -585,9 +603,13 @@ def add_job(db, url, company, title, status="NEW"):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db.execute(
         """INSERT INTO jobs
-           (key, id, source, url, company, title, fingerprint, first_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (key, short_id(key), key.split(":")[0], url, company, title, fp, now, status))
+           (key, id, source, url, company, title, fingerprint, first_seen,
+            status, application_url)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            key, short_id(key), source or key.split(":")[0], url, company,
+            title, fp, now, status, application_url,
+        ))
     db.commit()
     return ("possible_duplicate" if dup else "new"), key
 

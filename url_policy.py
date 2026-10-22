@@ -6,6 +6,7 @@ import urllib.request
 ALLOWED_JOB_DOMAINS = (
     "linkedin.com",
     "weworkremotely.com",
+    "workremot.com",
 )
 
 
