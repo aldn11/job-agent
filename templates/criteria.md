@@ -48,6 +48,7 @@ The wrapper also rejects any mandatory requirement with the status NOT_MET.
   - REMOTE_RESTRICTED: remote only for a country or region outside the US.
   - ONSITE_ALLOWED: on-site or hybrid in an allowed US location.
   - ONSITE_OTHER: on-site or hybrid in any non-US place.
+- location_evidence: copy the exact sentence or phrase from the job text or appended public-page metadata that supports work_mode and location_text. Use an empty string when the text does not state this information.
 - role_match: STRONG, PARTIAL or WEAK. STRONG means the title and the duties match the target jobs.
 - years_required: the number of years in the text. Use null if the text gives none.
 - seniority_level: JUNIOR, MID, SENIOR or NOT_STATED.
@@ -66,6 +67,7 @@ Use the English values shown here for all other fields.
  "text_source": "pasted|company_site|search_snippet",
  "info_status": "COMPLETE|INCOMPLETE",
  "work_mode": "", "location_text": "", "role_match": "",
+ "location_evidence": "",
  "years_required": null, "seniority_level": "",
  "english_level_required": "", "spoken_english_emphasis": false,
  "pay_currency": "",

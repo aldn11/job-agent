@@ -12,7 +12,8 @@ Use only evidence from the allowed files.
 - Talk to the user in Brazilian Portuguese.
 - Use "você" and "o perfil".
 - Do not assume the user's gender.
-- Write employer-facing text in clear B2 English.
+- Write employer-facing text in the language of the job posting.
+- Use clear B2 English when the job posting is in English.
 
 ## Startup
 
@@ -74,3 +75,16 @@ Do not add text before or after the JSON.
 
 Do not calculate the final score or final verdict.
 The wrapper script calculates them from the evaluation data.
+
+## Cover letter drafts
+
+When the user asks for a cover letter draft for a job:
+
+1. Read `candidate.md` and the supplied job text.
+2. Write the draft in the language of the job posting.
+3. Use only facts stated in `candidate.md`.
+4. Do not invent experience, skills, results, qualifications or employer facts.
+5. Use `[NAME]`, `[EMAIL]` and `[LINKEDIN]` as placeholders.
+6. Do not send an application, email or message.
+7. Return one JSON object with one string field named `cover_letter`.
+8. Do not use the job-evaluation JSON schema for this task.

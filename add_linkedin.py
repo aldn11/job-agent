@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 import sys
 import hashlib
-import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import store
 
 BASE_DIR = Path(__file__).parent
-VENV_PYTHON = BASE_DIR / "venv" / "bin" / "python"
+VENV_PYTHON = Path(sys.executable)
 INBOX_DIR = BASE_DIR / "inbox"
 WRAPPER_SCRIPT = BASE_DIR / "wrapper.py"
 DB_PATH = BASE_DIR / "jobs.db"
@@ -38,10 +38,11 @@ JOB TEXT:
 {job_text}
 """
     file_path = INBOX_DIR / f"{short_id}.txt"
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(file_content)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = store.connect(DB_PATH)
     cursor = conn.cursor()
     fingerprint = hashlib.sha256(f"{company.lower()}:{title.lower()}".encode('utf-8')).hexdigest()
     
