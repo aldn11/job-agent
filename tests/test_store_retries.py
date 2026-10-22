@@ -212,6 +212,34 @@ class StoreRetryTests(unittest.TestCase):
         db.close()
         self.assertEqual(status, "EVALUATED_MAYBE")
 
+    def test_legacy_migration_retires_evaluation_with_excessive_json_nesting(self):
+        db = store.connect(self.db_path)
+        with db:
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status, evaluation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "linkedin:nested",
+                    "nested",
+                    "linkedin",
+                    "https://www.linkedin.com/jobs/view/115",
+                    "Company",
+                    "Role",
+                    "fp-nested",
+                    "2026-01-01T00:00:00+00:00",
+                    "SCRAPE_PENDING",
+                    "[" * 2000 + "]" * 2000,
+                ),
+            )
+        store.restore_legacy_evaluations_from_scrape_queue(db)
+        status, = db.execute(
+            "SELECT status FROM jobs WHERE id = ?", ("nested",)
+        ).fetchone()
+        db.close()
+        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
+
     def test_new_migration_retires_backlog_with_missing_or_invalid_dates(self):
         db = store.connect(self.db_path)
         with db:

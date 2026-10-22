@@ -1,6 +1,11 @@
 import copy
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import wrapper
 from wrapper import calculate_score_and_verdict, validate_evaluation_data
 
 
@@ -83,6 +88,20 @@ class EvaluationValidationTests(unittest.TestCase):
         evaluation = dict(self.evaluation, years_required=None)
         result = calculate_score_and_verdict(evaluation, self.job_text)
         self.assertIsInstance(result["score"], int)
+
+    def test_rejects_excessively_nested_json_from_vargas(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_file = Path(temp_dir) / "job.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            result = subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout="[" * 2000 + "]" * 2000,
+                stderr="",
+            )
+            with patch.object(wrapper.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(ValueError, "JSON válido"):
+                    wrapper.run_vargas(job_file)
 
 
 if __name__ == "__main__":

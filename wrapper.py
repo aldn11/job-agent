@@ -201,7 +201,7 @@ def run_vargas(job_file_path: Path) -> dict:
     raw_output = res.stdout.strip()
     try:
         parsed = json.loads(raw_output)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError) as error:
         raise ValueError("Vargas não retornou um único objeto JSON válido.") from error
     return validate_evaluation_data(parsed, job_text)
 

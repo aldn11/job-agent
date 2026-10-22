@@ -1,8 +1,8 @@
-# Vargas — Job Screening Agent (v1.0.0) 
+# Vargas — Job Screening Agent (v1.3.4)
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/)
+[![Version](https://img.shields.io/badge/version-1.3.4-blue.svg)](https://github.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.12-green.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
 [![Hermes Agent](https://img.shields.io/badge/Agent-Hermes%20%2F%20Gemini-orange.svg)](https://github.com/NousResearch/Hermes-Agent)
 
 **Vargas** is an autonomous AI agent designed for automated job screening and candidate-matching evaluation. It eliminates the time-consuming process of manually reviewing dozens of job postings on LinkedIn and RSS feeds, automating data collection, factual profile matching, and real-time Telegram notifications for high-compatibility opportunities.
@@ -121,6 +121,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 ##  Security & Engineering Highlights
 
 * **Decoupled Responsibilities:** The LLM is used strictly for natural language understanding and fact extraction. Numerical scoring and final verdicts are 100% governed by deterministic Python code.
+* **Malformed JSON Handling:** Invalid or excessively nested model output is treated as a failed evaluation or draft; corrupt legacy evaluations are retired without aborting the database migration.
 * **Prompt Injection Protection:** Job description text is isolated as untrusted data between `BEGIN` and `END` blocks. If prompt injection attempts are detected within a job listing, the system records `prompt_injection_detected: true` and downgrades the job.
 * **Anonymous Ingestion:** No personal LinkedIn cookies or session tokens are used during job scraping.
 * **Environment Isolation:** Secrets, tokens, and API keys are stored in an untracked `.env` file.
@@ -136,6 +137,8 @@ job-agent/
 ├── LICENSE               # MIT Open Source License
 ├── README.md             # Technical project documentation
 ├── requirements.txt      # Locked Python dependencies
+├── scripts/
+│   └── validate.py       # Syntax check and complete offline test suite
 ├── add_linkedin.py       # Terminal interactive CLI for manual job ingestion
 ├── collector.py          # RSS feed collector script
 ├── cover_letter.py       # Vargas cover-letter draft generator for APPLY jobs
@@ -168,23 +171,31 @@ job-agent/
 
 1. **Clone the repository:**
 ```bash
-git clone [https://github.com/your-username/job-agent.git](https://github.com/your-username/job-agent.git)
+git clone https://github.com/your-username/job-agent.git
 cd job-agent
 
 ```
 
 
 2. **Create and activate a Python virtual environment:**
+
+Windows PowerShell:
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Linux/macOS:
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 ```
 
 
 3. **Install dependencies:**
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 ```
 
@@ -208,7 +219,7 @@ Before using cover-letter generation, synchronize the updated `templates/SOUL.md
 To run the complete pipeline manually:
 
 ```bash
-./venv/bin/python run_pipeline.py
+python run_pipeline.py
 
 ```
 
@@ -217,11 +228,27 @@ The pipeline continues with other work after a stage fails, but exits with a non
 To view all approved (`EVALUATED_APPLY`) jobs in your terminal:
 
 ```bash
-./venv/bin/python list_jobs.py
+python list_jobs.py
 
 ```
 
-### 4. Automated Daily Execution (`cron`)
+### 4. Test Environment and Validation
+
+The test suite uses Python's standard `unittest` runner and mocks Docker, IMAP,
+HTTP, and Telegram interactions. It does not require credentials, a running
+Hermes container, or network access. After creating and activating `.venv` and
+installing dependencies from `requirements.txt`, run this command on Windows,
+Linux, or macOS:
+
+```bash
+python scripts/validate.py
+```
+
+The script checks the syntax of project, test, and script Python files, then
+runs every test under `tests/`. It returns a non-zero exit code if either check
+fails. No separate test dependency is required.
+
+### 5. Automated Daily Execution (`cron`)
 
 To schedule daily automated runs on your Linux server (e.g., twice daily at 07:00 and 19:00):
 
@@ -233,7 +260,7 @@ crontab -e
 Add the following schedule:
 
 ```cron
-0 10,22 * * * cd /path/to/job-agent && ./venv/bin/python run_pipeline.py >> pipeline.log 2>&1
+0 10,22 * * * cd /path/to/job-agent && ./.venv/bin/python run_pipeline.py >> pipeline.log 2>&1
 
 ```
 

@@ -69,7 +69,7 @@ def generate_cover_letter(job_text: str, evaluation: dict) -> str:
         ).strip()
     try:
         output = json.loads(raw_output)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError) as error:
         raise ValueError("Vargas retornou JSON inválido para a carta.") from error
     if not isinstance(output, dict) or set(output) != {"cover_letter"}:
         raise ValueError("Vargas retornou campos inválidos para a carta.")

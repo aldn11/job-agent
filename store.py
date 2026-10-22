@@ -161,7 +161,7 @@ def restore_legacy_evaluations_from_scrape_queue(db):
     for job_key, raw_evaluation in rows:
         try:
             evaluation = json.loads(raw_evaluation)
-        except (TypeError, json.JSONDecodeError):
+        except (TypeError, json.JSONDecodeError, RecursionError):
             unavailable.append(job_key)
             continue
         if not isinstance(evaluation, dict):
