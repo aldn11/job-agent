@@ -232,21 +232,42 @@ python list_jobs.py
 
 ```
 
-### 4. Test Environment and Validation
+### 4. Ambiente e Validação dos Testes
 
-The test suite uses Python's standard `unittest` runner and mocks Docker, IMAP,
-HTTP, and Telegram interactions. It does not require credentials, a running
-Hermes container, or network access. After creating and activating `.venv` and
-installing dependencies from `requirements.txt`, run this command on Windows,
-Linux, or macOS:
+O projeto usa o `unittest` que já vem com o Python; não é preciso instalar
+ferramenta de testes adicional. No PowerShell, a partir da pasta do repositório,
+crie o ambiente virtual (somente na primeira vez), instale as dependências e
+rode a validação:
 
-```bash
-python scripts/validate.py
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe scripts\validate.py
 ```
 
-The script checks the syntax of project, test, and script Python files, then
-runs every test under `tests/`. It returns a non-zero exit code if either check
-fails. No separate test dependency is required.
+Nas próximas execuções, basta repetir:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate.py
+```
+
+No Linux/macOS, use:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python scripts/validate.py
+```
+
+O script verifica a sintaxe de todos os arquivos Python do projeto, confirma
+que cada módulo Python principal tem arquivo de teste associado e executa
+toda a suíte em `tests/`. Os testes cobrem RSS, cadastro manual, leitura de
+e-mail, políticas de URL/localização, persistência e retentativas SQLite,
+avaliação/pontuação, cartas, notificações, listagem e orquestração do pipeline.
+Chamadas de Docker/Hermes, IMAP, HTTP e Telegram são simuladas; a validação não
+usa credenciais nem acessa esses serviços. Ela detecta regressões cobertas
+pelos testes, mas não garante funcionamento perfeito em produção nem substitui
+um teste operacional controlado com o ambiente do usuário.
 
 ### 5. Automated Daily Execution (`cron`)
 
