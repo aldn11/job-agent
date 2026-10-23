@@ -89,42 +89,6 @@ def send_telegram_alert(evaluation_data: dict):
     return _send_telegram_request(request)
 
 
-def send_telegram_document(evaluation_data: dict):
-    cover_letter = evaluation_data.get("cover_letter")
-    if not cover_letter:
-        raise ValueError("A notificação exige uma carta de apresentação.")
-
-    token = os.getenv("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
-    if not token:
-        raise RuntimeError("TELEGRAM_TOKEN não configurado.")
-    if not chat_id:
-        raise RuntimeError("TELEGRAM_CHAT_ID não configurado.")
-
-    boundary = f"----JobAgent{uuid.uuid4().hex}"
-    chunks = [
-        f"--{boundary}\r\n".encode(),
-        b'Content-Disposition: form-data; name="chat_id"\r\n\r\n',
-        str(chat_id).encode("utf-8"),
-        b"\r\n",
-        f"--{boundary}\r\n".encode(),
-        (
-            'Content-Disposition: form-data; name="document"; '
-            f'filename="cover-letter-{evaluation_data.get("job_id", "job")}.txt"\r\n'
-        ).encode(),
-        b"Content-Type: text/plain; charset=utf-8\r\n\r\n",
-        str(cover_letter).encode("utf-8"),
-        b"\r\n",
-        f"--{boundary}--\r\n".encode(),
-    ]
-    request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendDocument",
-        data=b"".join(chunks),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
-    return _send_telegram_request(request)
-
-
 def _send_telegram_request(request):
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -175,9 +139,6 @@ def deliver_pending_notifications(db_path):
             if not alert_sent:
                 send_telegram_alert(notification)
                 store.mark_notification_alert_sent(notification_id, db_path)
-            if not letter_sent:
-                send_telegram_document(notification)
-                store.mark_notification_letter_sent(notification_id, db_path)
             print(f"[+] Notificação {notification_id} entregue ao Telegram.")
         except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
             store.mark_notification_failed(notification_id, error, db_path)
