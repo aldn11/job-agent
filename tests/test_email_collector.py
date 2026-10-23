@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -249,6 +250,65 @@ class EmailCollectorTests(unittest.TestCase):
                 self.assertNotIn("Link original para consulta", text)
                 db.close()
 
+    def test_short_descriptions_move_to_manual_review_after_five_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = store.connect(":memory:")
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for job_id, url in (
+                ("short", "https://www.linkedin.com/jobs/view/4561"),
+                ("network", "https://www.linkedin.com/jobs/view/4562"),
+            ):
+                store.add_job(
+                    db, url, "Company", job_id, status="SCRAPE_PENDING"
+                )
+                key = store.job_key(url)
+                db.execute(
+                    """UPDATE jobs SET scrape_attempts = 4,
+                       scrape_next_attempt = NULL, first_seen = ? WHERE key = ?""",
+                    (now, key),
+                )
+            db.commit()
+            short_error = email_collector.ScrapeError(
+                "A descrição extraída é curta demais para avaliação.",
+                manual_review_after_retries=True,
+            )
+            with (
+                patch.object(
+                    email_collector,
+                    "INBOX_DIR",
+                    Path(temp_dir) / "inbox",
+                ),
+                patch.object(
+                    email_collector,
+                    "fetch_public_job_text",
+                    side_effect=[
+                        short_error,
+                        email_collector.ScrapeError("Falha temporária de rede."),
+                    ],
+                ),
+            ):
+                email_collector.process_pending_scrapes(db)
+
+            rows = dict(
+                db.execute(
+                    "SELECT title, status FROM jobs"
+                ).fetchall()
+            )
+            attempts = dict(
+                db.execute(
+                    "SELECT title, scrape_attempts FROM jobs"
+                ).fetchall()
+            )
+            retry_at, = db.execute(
+                "SELECT scrape_next_attempt FROM jobs WHERE title = 'network'"
+            ).fetchone()
+            db.close()
+        self.assertEqual(rows["short"], "SCRAPE_REVIEW")
+        self.assertEqual(attempts["short"], 5)
+        self.assertEqual(rows["network"], "SCRAPE_PENDING")
+        self.assertEqual(attempts["network"], 5)
+        self.assertIsNotNone(retry_at)
+
     def test_processes_every_unread_email_and_marks_it_after_persisting(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             imap = FakeImap()
@@ -311,23 +371,119 @@ class EmailCollectorTests(unittest.TestCase):
         flagged = [event[1] for event in imap.events if event[0] == "store"]
         self.assertEqual(flagged, [b"2", b"5"])
 
-    def test_unrecognized_unread_message_is_not_marked_seen(self):
+    def test_unrecognized_unread_message_is_recorded_then_marked_seen(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "jobs.db"
             imap = FakeImap()
             imap.ids = [b"unrecognized"]
             with (
                 patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
                 patch.object(email_collector, "EMAIL_USER", "user"),
                 patch.object(email_collector, "EMAIL_PASS", "secret"),
-                patch.object(email_collector, "DB_PATH", Path(temp_dir) / "jobs.db"),
+                patch.object(email_collector, "DB_PATH", db_path),
                 patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
                 patch.object(email_collector, "parse_linkedin_jobs", return_value=0),
                 patch.object(email_collector, "persist_remot_jobs", return_value=0),
             ):
-                with self.assertRaisesRegex(RuntimeError, "permanecem não lidos"):
+                processed = email_collector.fetch_linkedin_emails()
+                db = store.connect(db_path)
+                rows = db.execute(
+                    """SELECT imap_sequence_id, subject, sender, reason
+                       FROM email_review_queue"""
+                ).fetchall()
+                db.close()
+
+        self.assertEqual(processed, 1)
+        self.assertIn(
+            ("store", b"unrecognized", "+FLAGS", "\\Seen"), imap.events
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "unrecognized")
+        self.assertIn("Nenhum anúncio", rows[0][3])
+
+    def test_unrecognized_email_is_persisted_before_seen_flag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "jobs.db"
+            raw = (
+                b"Message-ID: <review-1@example.test>\r\n"
+                b"From: newsletter@example.test\r\n"
+                b"Subject: Weekly newsletter\r\n"
+                b"Date: Fri, 23 Oct 2026 00:00:00 -0300\r\n\r\n"
+                b"Nothing job-related."
+            )
+
+            class OrderedImap(FakeImap):
+                def fetch(self, email_id, query):
+                    self.events.append(("fetch", email_id, query))
+                    return "OK", [(b"body", raw)]
+
+                def store(self, email_id, operation, flag):
+                    db = store.connect(db_path)
+                    self.review_count_before_seen = db.execute(
+                        "SELECT COUNT(*) FROM email_review_queue"
+                    ).fetchone()[0]
+                    db.close()
+                    return super().store(email_id, operation, flag)
+
+            imap = OrderedImap()
+            imap.ids = [b"9"]
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "secret"),
+                patch.object(email_collector, "DB_PATH", db_path),
+                patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
+                patch.object(email_collector, "parse_linkedin_jobs", return_value=0),
+                patch.object(email_collector, "persist_remot_jobs", return_value=0),
+            ):
+                email_collector.fetch_linkedin_emails()
+
+            self.assertEqual(imap.review_count_before_seen, 1)
+            db = store.connect(db_path)
+            row = db.execute(
+                """SELECT message_id, sender, subject, sent_at
+                   FROM email_review_queue"""
+            ).fetchone()
+            db.close()
+        self.assertEqual(
+            row,
+            (
+                "<review-1@example.test>",
+                "newsletter@example.test",
+                "Weekly newsletter",
+                "Fri, 23 Oct 2026 00:00:00 -0300",
+            ),
+        )
+
+    def test_failed_seen_flag_keeps_review_record_and_email_retryable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "jobs.db"
+
+            class FlagFailureImap(FakeImap):
+                def store(self, email_id, operation, flag):
+                    self.events.append(("store", email_id, operation, flag))
+                    return "NO", []
+
+            imap = FlagFailureImap()
+            imap.ids = [b"10"]
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "secret"),
+                patch.object(email_collector, "DB_PATH", db_path),
+                patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
+                patch.object(email_collector, "parse_linkedin_jobs", return_value=0),
+                patch.object(email_collector, "persist_remot_jobs", return_value=0),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 opera"):
                     email_collector.fetch_linkedin_emails()
 
-        self.assertFalse(any(event[0] == "store" for event in imap.events))
+            db = store.connect(db_path)
+            count, = db.execute(
+                "SELECT COUNT(*) FROM email_review_queue"
+            ).fetchone()
+            db.close()
+        self.assertEqual(count, 1)
 
     def test_bad_email_does_not_block_later_unread_alerts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -345,7 +501,7 @@ class EmailCollectorTests(unittest.TestCase):
                 patch.object(email_collector, "parse_linkedin_jobs") as parse_mock,
                 patch.object(imap, "fetch", side_effect=responses),
             ):
-                with self.assertRaisesRegex(RuntimeError, "1 e-mail"):
+                with self.assertRaisesRegex(RuntimeError, "1 opera"):
                     email_collector.fetch_linkedin_emails()
 
             self.assertEqual(parse_mock.call_count, 6)

@@ -28,6 +28,36 @@ EVALUATION_FIELDS = {
     "nice_to_have", "hard_reject_flags", "prompt_injection_detected",
     "red_flags", "reasons_pt", "gaps_pt", "interview_risks_pt",
 }
+ALLOWED_HARD_REJECT_FLAGS = {
+    "LANGUAGE_REQUIRED", "CERTIFICATION_REQUIRED", "RESIDENCE_REQUIRED",
+    "SENIOR_ROLE", "UNPAID_OR_COMMISSION_ONLY", "SCAM_SIGNS",
+}
+HERMES_DIAGNOSTIC_LIMIT = 2000
+
+
+def _diagnostic_output(value):
+    if value is None:
+        return "(vazio)"
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = "".join(
+        character
+        for character in str(value)
+        if character in "\n\r\t" or ord(character) >= 32
+    ).strip()
+    if not text:
+        return "(vazio)"
+    if len(text) > HERMES_DIAGNOSTIC_LIMIT:
+        return text[:HERMES_DIAGNOSTIC_LIMIT] + "\n...[saída truncada]"
+    return text
+
+
+def _process_failure_details(error):
+    return (
+        f"Hermes falhou com código de saída {error.returncode}.\n"
+        f"stderr:\n{_diagnostic_output(error.stderr)}\n"
+        f"stdout:\n{_diagnostic_output(error.stdout)}"
+    )
 
 
 def validate_evaluation_data(data: dict, job_text: str) -> dict:
@@ -96,12 +126,17 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
         "interview_risks_pt",
     ):
         validate_string_list(field)
-    allowed_hard_rejects = {
-        "LANGUAGE_REQUIRED", "CERTIFICATION_REQUIRED", "RESIDENCE_REQUIRED",
-        "SENIOR_ROLE", "UNPAID_OR_COMMISSION_ONLY", "SCAM_SIGNS",
-    }
-    if any(flag not in allowed_hard_rejects for flag in data["hard_reject_flags"]):
-        raise ValueError("hard_reject_flags contém um valor não reconhecido.")
+    invalid_flags = [
+        flag
+        for flag in data["hard_reject_flags"]
+        if flag not in ALLOWED_HARD_REJECT_FLAGS
+    ]
+    if invalid_flags:
+        raise ValueError(
+            "hard_reject_flags contém valor(es) não reconhecido(s): "
+            f"{invalid_flags[:5]!r}. Valores aceitos: "
+            f"{', '.join(sorted(ALLOWED_HARD_REJECT_FLAGS))}."
+        )
 
     mandatory = data["mandatory_requirements"]
     if not isinstance(mandatory, list):
@@ -137,7 +172,13 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
             raise ValueError("Item nice_to_have inválido.")
 
     if data["location_evidence"] and data["location_evidence"] not in job_text:
-        raise ValueError("location_evidence não corresponde literalmente à vaga.")
+        evidence = data["location_evidence"]
+        excerpt = evidence[:240] + ("..." if len(evidence) > 240 else "")
+        raise ValueError(
+            "location_evidence não corresponde literalmente à vaga. "
+            f"Valor recebido: {excerpt!r}. Copie uma frase/trecho exato do texto "
+            "ou dos metadados da vaga, ou use string vazia se não houver evidência."
+        )
     if data["info_status"] == "COMPLETE" and len(job_text.strip()) < 100:
         raise ValueError("A vaga é curta demais para uma avaliação completa.")
     return data
@@ -168,6 +209,11 @@ def run_vargas(job_file_path: Path) -> dict:
         "Inclua location_evidence com uma citação exata do texto ou dos metadados "
         "da página que sustentem work_mode e location_text. Use string vazia se "
         "não houver evidência explícita.\n"
+        "Para hard_reject_flags, use somente estes códigos exatos: "
+        f"{', '.join(sorted(ALLOWED_HARD_REJECT_FLAGS))}. "
+        "Não escreva descrições ou variações nos itens dessa lista. "
+        "Para location_evidence, copie literalmente, preservando palavras e "
+        "pontuação; se não houver trecho de suporte, use string vazia.\n"
         "BEGIN\n"
         f"{job_text}\n"
         "END"
@@ -194,9 +240,16 @@ def run_vargas(job_file_path: Path) -> dict:
             timeout=HERMES_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as error:
+        diagnostics = (
+            f"\nstderr parcial:\n{_diagnostic_output(error.stderr)}"
+            f"\nstdout parcial:\n{_diagnostic_output(error.stdout)}"
+        )
         raise RuntimeError(
             f"Vargas excedeu o timeout de {HERMES_TIMEOUT_SECONDS} segundos."
+            f"{diagnostics}"
         ) from error
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(_process_failure_details(error)) from error
 
     raw_output = res.stdout.strip()
     try:

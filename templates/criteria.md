@@ -1,4 +1,4 @@
-# Search criteria (version 4)
+# Search criteria (version 5)
 
 ## Purpose
 Read one job text. Extract facts. Compare the facts with candidate.md.
@@ -32,6 +32,9 @@ All other countries or non-US locations are not allowed.
 
 ## Step 2: set the flags
 Add a flag to hard_reject_flags when the job text shows one of these facts.
+- Use only these exact string values: `LANGUAGE_REQUIRED`, `CERTIFICATION_REQUIRED`,
+  `RESIDENCE_REQUIRED`, `SENIOR_ROLE`, `UNPAID_OR_COMMISSION_ONLY` and `SCAM_SIGNS`.
+- Do not put explanations, translations or paraphrases in `hard_reject_flags`.
 - LANGUAGE_REQUIRED: a mandatory language other than English (or specified allowed languages).
 - CERTIFICATION_REQUIRED: a mandatory degree or certificate that candidate.md does not show.
 - RESIDENCE_REQUIRED: residence or work permit in a country outside the United States.
@@ -48,7 +51,7 @@ The wrapper also rejects any mandatory requirement with the status NOT_MET.
   - REMOTE_RESTRICTED: remote only for a country or region outside the US.
   - ONSITE_ALLOWED: on-site or hybrid in an allowed US location.
   - ONSITE_OTHER: on-site or hybrid in any non-US place.
-- location_evidence: copy the exact sentence or phrase from the job text or appended public-page metadata that supports work_mode and location_text. Use an empty string when the text does not state this information.
+- location_evidence: copy verbatim, including punctuation, the exact sentence or phrase from the job text or appended public-page metadata that supports work_mode and location_text. Do not paraphrase or normalize it. Use an empty string when the text does not state this information.
 - role_match: STRONG, PARTIAL or WEAK. STRONG means the title and the duties match the target jobs.
 - years_required: the number of years in the text. Use null if the text gives none.
 - seniority_level: JUNIOR, MID, SENIOR or NOT_STATED.
