@@ -275,6 +275,60 @@ class EmailCollectorTests(unittest.TestCase):
                     imap.events,
                 )
 
+    def test_only_unseen_search_results_are_fetched_for_both_sources(self):
+        class UnseenOnlyImap(FakeImap):
+            def search(self, *args):
+                self.events.append(("search", args))
+                if args[1:] == ("UNSEEN", "FROM", "linkedin.com"):
+                    return "OK", [b"2"]
+                if args[1:] == ("UNSEEN", "BODY", "workremot.com"):
+                    return "OK", [b"5"]
+                return "OK", [b""]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            imap = UnseenOnlyImap()
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "secret"),
+                patch.object(email_collector, "DB_PATH", Path(temp_dir) / "jobs.db"),
+                patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
+                patch.object(email_collector, "parse_linkedin_jobs", return_value=1),
+            ):
+                processed = email_collector.fetch_linkedin_emails()
+
+        self.assertEqual(processed, 2)
+        searches = [event[1] for event in imap.events if event[0] == "search"]
+        self.assertEqual(
+            searches,
+            [
+                (None, "UNSEEN", "FROM", "linkedin.com"),
+                (None, "UNSEEN", "BODY", "workremot.com"),
+            ],
+        )
+        fetched = [event[1] for event in imap.events if event[0] == "fetch"]
+        self.assertEqual(fetched, [b"2", b"5"])
+        flagged = [event[1] for event in imap.events if event[0] == "store"]
+        self.assertEqual(flagged, [b"2", b"5"])
+
+    def test_unrecognized_unread_message_is_not_marked_seen(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            imap = FakeImap()
+            imap.ids = [b"unrecognized"]
+            with (
+                patch.object(email_collector.imaplib, "IMAP4_SSL", return_value=imap),
+                patch.object(email_collector, "EMAIL_USER", "user"),
+                patch.object(email_collector, "EMAIL_PASS", "secret"),
+                patch.object(email_collector, "DB_PATH", Path(temp_dir) / "jobs.db"),
+                patch.object(email_collector, "queue_legacy_incomplete_linkedin_files"),
+                patch.object(email_collector, "parse_linkedin_jobs", return_value=0),
+                patch.object(email_collector, "persist_remot_jobs", return_value=0),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "permanecem não lidos"):
+                    email_collector.fetch_linkedin_emails()
+
+        self.assertFalse(any(event[0] == "store" for event in imap.events))
+
     def test_bad_email_does_not_block_later_unread_alerts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             imap = FakeImap()
@@ -295,9 +349,9 @@ class EmailCollectorTests(unittest.TestCase):
                     email_collector.fetch_linkedin_emails()
 
             self.assertEqual(parse_mock.call_count, 6)
-            self.assertEqual(
-                len([event for event in imap.events if event[0] == "store"]), 6
-            )
+            flagged = [event[1] for event in imap.events if event[0] == "store"]
+            self.assertNotIn(b"1", flagged)
+            self.assertEqual(len(flagged), 6)
 
     def test_remot_alert_is_committed_before_seen_and_waits_for_manual_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
