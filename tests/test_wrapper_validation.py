@@ -115,8 +115,32 @@ class EvaluationValidationTests(unittest.TestCase):
                 stderr="",
             )
             with patch.object(wrapper.subprocess, "run", return_value=result):
-                with self.assertRaisesRegex(ValueError, "JSON válido"):
+                with self.assertRaisesRegex(ValueError, "único objeto JSON válido"):
                     wrapper.run_vargas(job_file)
+
+    def test_invalid_json_response_includes_bounded_stdout_and_stderr(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_file = Path(temp_dir) / "job.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            terminal_error = "FINAL: Hermes returned no evaluation payload"
+            stdout = "session_id: test-session\n" + "progress " * 500 + terminal_error
+            result = subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout=stdout,
+                stderr="warning: response was empty",
+            )
+            with patch.object(wrapper.subprocess, "run", return_value=result):
+                with self.assertRaises(ValueError) as raised:
+                    wrapper.run_vargas(job_file)
+
+        message = str(raised.exception)
+        self.assertIn("código de saída 0", message)
+        self.assertIn("JSON válido", message)
+        self.assertIn("session_id: test-session", message)
+        self.assertIn("caracteres omitidos", message)
+        self.assertIn(terminal_error, message)
+        self.assertIn("warning: response was empty", message)
 
     def test_hermes_nonzero_exit_includes_bounded_stdout_and_stderr(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -151,12 +175,32 @@ class EvaluationValidationTests(unittest.TestCase):
         self.assertIn("partial stdout", str(raised.exception))
 
     def test_hermes_diagnostic_output_is_truncated(self):
-        output = wrapper._diagnostic_output("x" * (wrapper.HERMES_DIAGNOSTIC_LIMIT + 10))
-        self.assertEqual(
-            len(output),
-            wrapper.HERMES_DIAGNOSTIC_LIMIT + len("\n...[saída truncada]"),
+        terminal_error = "FINAL HERMES ERROR: generation failed"
+        raw = (
+            "Hermes session started\n"
+            + "middle output " * 500
+            + terminal_error
         )
-        self.assertTrue(output.endswith("...[saída truncada]"))
+        output = wrapper._diagnostic_output(raw)
+        self.assertLessEqual(len(output), wrapper.HERMES_DIAGNOSTIC_LIMIT)
+        self.assertIn("Hermes session started", output)
+        self.assertIn("caracteres omitidos", output)
+        self.assertIn(terminal_error, output)
+
+    def test_nonzero_hermes_exit_is_failure_even_when_stdout_is_valid_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_file = Path(temp_dir) / "job.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            error = subprocess.CalledProcessError(
+                1,
+                ["docker", "exec"],
+                output='{"result":"looks valid"}',
+                stderr="process failed after producing output",
+            )
+            with patch.object(wrapper.subprocess, "run", side_effect=error):
+                with self.assertRaises(RuntimeError) as raised:
+                    wrapper.run_vargas(job_file)
+        self.assertIn("código de saída 1", str(raised.exception))
 
 
 if __name__ == "__main__":
