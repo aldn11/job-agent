@@ -109,6 +109,12 @@ class RunPipelineStageTests(unittest.TestCase):
                 for call in run_command.call_args_list
             )
         )
+        self.assertTrue(
+            any(
+                str(call.args[0][1]).endswith("remotive_collector.py")
+                for call in run_command.call_args_list
+            )
+        )
 
 
 if __name__ == "__main__":

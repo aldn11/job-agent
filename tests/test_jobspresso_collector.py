@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,7 @@ class JobspressoCollectorTests(unittest.TestCase):
         self.assertEqual(job["title"], "Customer Support Specialist")
         self.assertEqual(job["company"], "Example Company")
         self.assertEqual(job["location"], "Worldwide")
+        self.assertEqual(job["categories"], ["Customer Service"])
         self.assertEqual(job["published"], "2026-10-22T18:25:13+00:00")
         self.assertIn("investigate product issues", job["description"])
         self.assertNotIn("appeared first on Jobspresso", job["description"])
@@ -149,6 +151,29 @@ class JobspressoCollectorTests(unittest.TestCase):
         self.assertIn("investigate product issues", description)
         self.assertNotIn("appeared first on Jobspresso", text)
         open_url.assert_not_called()
+
+    def test_main_applies_configured_local_metadata_filter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "JOBSPRESSO_INCLUDE_CATEGORIES": "customer service",
+                        "JOBSPRESSO_INCLUDE_TERMS": "",
+                        "JOBSPRESSO_EXCLUDE_TERMS": "",
+                        "JOBSPRESSO_INCLUDE_LOCATIONS": "",
+                    },
+                ),
+                patch.object(jobspresso_collector, "fetch", return_value=FIXTURE),
+                patch.object(jobspresso_collector, "INBOX_DIR", root / "inbox"),
+                patch.object(jobspresso_collector, "DB_PATH", root / "jobs.db"),
+            ):
+                jobspresso_collector.main()
+            db = store.connect(root / "jobs.db")
+            rows = db.execute("SELECT title FROM jobs").fetchall()
+            db.close()
+        self.assertEqual(rows, [("Customer Support Specialist",)])
 
 
 if __name__ == "__main__":

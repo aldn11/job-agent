@@ -45,12 +45,17 @@ def run_pipeline():
         failures,
     )
     run_stage(
-        "3. EXECUTANDO COLETOR DE E-MAIL (LinkedIn e Remot)",
+        "3. EXECUTANDO COLETOR RSS (Remotive)",
+        [VENV_PYTHON, str(BASE_DIR / "remotive_collector.py")],
+        failures,
+    )
+    run_stage(
+        "4. EXECUTANDO COLETOR DE E-MAIL (LinkedIn e Remot)",
         [VENV_PYTHON, str(BASE_DIR / "email_collector.py")],
         failures,
     )
 
-    print("\n=== 4. PROCESSANDO VAGAS PENDENTES NA CAIXA DE ENTRADA ===")
+    print("\n=== 5. PROCESSANDO VAGAS PENDENTES NA CAIXA DE ENTRADA ===")
     rows = store.pending_evaluation_jobs(DB_PATH)
 
     for (short_id,) in rows:
@@ -93,7 +98,7 @@ def run_pipeline():
         )
         failures.append("Vagas pendentes de avaliação")
 
-    print("\n=== 5. ENVIANDO NOTIFICAÇÕES PENDENTES ===")
+    print("\n=== 6. ENVIANDO NOTIFICAÇÕES PENDENTES ===")
     from telegram_notify import deliver_pending_notifications
     if deliver_pending_notifications(DB_PATH):
         failures.append("Entrega de notificações Telegram")
