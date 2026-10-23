@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 import store
+import feed_filters
 import url_policy
 
 load_dotenv()
@@ -79,6 +80,17 @@ def _child_text(element, name):
         None,
     )
     return child.text.strip() if child is not None and child.text else ""
+
+
+def _child_texts(element, name):
+    local_name = name.rsplit("}", 1)[-1]
+    return [
+        child.text.strip()
+        for child in element
+        if child.tag.rsplit("}", 1)[-1] == local_name
+        and child.text
+        and child.text.strip()
+    ]
 
 
 def _plain_text(value):
@@ -163,6 +175,7 @@ def parse(xml_bytes):
             "title": title,
             "company": company or "Empresa não especificada",
             "location": location,
+            "categories": _child_texts(item, "category"),
             "published": _publication_date(_child_text(item, "pubDate")),
             "description": description,
         }
@@ -186,12 +199,21 @@ def save_text(job_id, job, note=""):
         f"PUBLIC PAGE METADATA:\n"
         f"PUBLISHED: {_one_line(job['published'], 'Not found')}\n"
         f"REGION: {_one_line(job['location'], 'Not found')}\n"
+        f"CATEGORIES: {_one_line('; '.join(job.get('categories', [])), 'Not found')}\n"
     )
     return store.write_inbox_file(INBOX_DIR, job_id, content)
 
 
 def main():
     jobs = parse(fetch())
+    total_jobs = len(jobs)
+    jobs = feed_filters.filter_jobs(
+        jobs,
+        include_terms=os.getenv("JOBSPRESSO_INCLUDE_TERMS", ""),
+        exclude_terms=os.getenv("JOBSPRESSO_EXCLUDE_TERMS", ""),
+        include_categories=os.getenv("JOBSPRESSO_INCLUDE_CATEGORIES", ""),
+        include_locations=os.getenv("JOBSPRESSO_INCLUDE_LOCATIONS", ""),
+    )
     db = store.connect(DB_PATH)
     counts = {"new": 0, "seen": 0, "possible_duplicate": 0}
     try:
@@ -223,7 +245,7 @@ def main():
         db.close()
 
     print(
-        f"\nFeed Jobspresso: {len(jobs)} anúncios completos | "
+        f"\nFeed Jobspresso: {len(jobs)} de {total_jobs} anúncios completos após filtros | "
         f"novos: {counts['new']} | já vistos: {counts['seen']} | "
         f"possíveis duplicatas: {counts['possible_duplicate']}"
     )

@@ -8,6 +8,7 @@ ALLOWED_JOB_DOMAINS = (
     "weworkremotely.com",
     "workremot.com",
     "jobspresso.co",
+    "remotive.com",
 )
 
 

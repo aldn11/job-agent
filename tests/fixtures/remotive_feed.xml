@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Remotive Remote Jobs RSS Feed</title>
+    <item>
+      <title>Customer Support Specialist</title>
+      <jobId>300001</jobId>
+      <company>Example Support Co.</company>
+      <location>Worldwide</location>
+      <type>full_time</type>
+      <guid isPermaLink="false">https://remotive.com/remote-jobs/customer-support/customer-support-specialist-300001</guid>
+      <link>https://remotive.com/remote-jobs/customer-support/customer-support-specialist-300001</link>
+      <pubDate>Thu, 22 Oct 2026 18:40:19 GMT</pubDate>
+      <dc:creator>Example Support Co.</dc:creator>
+      <category>Customer Service</category>
+      <description><![CDATA[
+        <div>
+          <p>Example Support Co. is seeking a customer support specialist
+          to help customers solve product questions and account problems.</p>
+          <p>You will investigate reports, explain solutions, record useful
+          details, and collaborate with product and engineering teammates.</p>
+          <p>Strong written communication, patience, good judgment, and
+          careful follow-through are important for this remote position.</p>
+          <p>Experience with support tools and distributed teams is welcome.
+          You will help maintain a reliable, respectful customer experience.</p>
+        </div>
+      ]]></description>
+    </item>
+    <item>
+      <title>Sales Development Representative</title>
+      <jobId>300002</jobId>
+      <company>Example Sales Co.</company>
+      <location>United States</location>
+      <type>full_time</type>
+      <guid isPermaLink="false">https://remotive.com/remote-jobs/sales/sales-development-representative-300002</guid>
+      <link>https://remotive.com/remote-jobs/sales/sales-development-representative-300002</link>
+      <pubDate>Fri, 23 Oct 2026 01:00:00 GMT</pubDate>
+      <category>Sales</category>
+      <description><![CDATA[
+        <p>This full time sales role will identify prospective customers,
+        conduct thoughtful outreach, and qualify opportunities for the team.</p>
+        <p>Successful candidates communicate clearly, maintain accurate
+        pipeline records, and coordinate discovery meetings with account
+        executives across a distributed organization.</p>
+        <p>Previous experience with customer conversations, CRM software,
+        and business development is useful. The team values curiosity,
+        accountability, and consistent follow up with potential customers.</p>
+      ]]></description>
+    </item>
+    <item>
+      <title>Duplicate listing</title>
+      <link>https://www.remotive.com/remote-jobs/customer-support/customer-support-specialist-300001?utm_source=rss</link>
+      <description><![CDATA[This duplicate is discarded by canonical URL.]]></description>
+    </item>
+    <item>
+      <title>Fake listing</title>
+      <link>https://remotive.com.attacker.example/remote-jobs/fake/1</link>
+      <description><![CDATA[
+        <p>A long enough fake listing description is still rejected because
+        the listing URL does not belong to the exact Remotive host domain.</p>
+        <p>The feed parser must refuse this link before it enters SQLite.</p>
+      ]]></description>
+    </item>
+    <item>
+      <title>Short listing</title>
+      <link>https://remotive.com/remote-jobs/customer-support/short-300003</link>
+      <description><![CDATA[<p>Too short.</p>]]></description>
+    </item>
+  </channel>
+</rss>

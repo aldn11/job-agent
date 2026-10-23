@@ -27,14 +27,14 @@ Searching for relevant job opportunities requires manually screening hundreds of
 
 ```text
  ┌────────────────────────┐      ┌─────────────────────────┐
- │   Email Job Alerts     │      │ RSS: We Work Remotely + │
- │ (LinkedIn / Remōt)     │       │       Jobspresso        │
+ │   Email Job Alerts     │      │ RSS: WWR + Jobspresso + │
+ │ (LinkedIn / Remōt)     │       │       Remotive          │
  └───────────┬────────────┘      └────────────┬────────────┘
              │ IMAP                           │ HTTP / RSS
              ▼                                ▼
   ┌─────────────────────┐          ┌─────────────────────┐
-  │ email_collector.py  │          │ collector.py +      │
-  │ (Anonymous Scraping)│          │ jobspresso_collector│
+  │ email_collector.py  │          │ RSS collectors      │
+  │ (Anonymous Scraping)│          │ (WWR/Jobspresso/Rem.)│
   └──────────┬──────────┘          └──────────┬──────────┘
              │                                │
              └────────────────┬───────────────┘
@@ -78,11 +78,14 @@ Searching for relevant job opportunities requires manually screening hundreds of
 1. **Multi-Source & Anonymous Ingestion:**
 * **`collector.py`**: Ingests the public We Work Remotely RSS feed, applying inclusion/exclusion lists and text normalization.
 * **`jobspresso_collector.py`**: Ingests only the public Jobspresso job-listing RSS feed (`https://jobspresso.co/feed/?post_type=job_listing`); it does not fetch listing pages. It reads `content:encoded` (or RSS `description` as fallback), and records company/location from RSS creator metadata and publication time from `pubDate`. Only HTTPS links on `jobspresso.co` and its subdomains are accepted; duplicate entries are normalized before SQLite persistence. Descriptions shorter than 100 characters or 15 words are skipped. Publication date and location are recorded outside the `JOB TEXT` section; the complete feed content remains untrusted data within Vargas's existing `BEGIN`/`END` prompt boundary.
+* **`remotive_collector.py`**: Ingests only Remotive's public RSS XML at `https://remotive.com/remote-jobs/feed` (`https://remotive.com/feed` currently returns 404). It stores the original Remotive listing URL and credits Remotive in the inbox text and alert source; it does not crawl listing HTML or submit/relist jobs on third-party job boards. The resulting evaluation and private Telegram alert remain within the user's personal workflow. RSS entries include title, job ID, company, location, job type, category, publication date and HTML description. Descriptions need at least 100 characters and 15 words; prompt boundary lines from RSS are neutralized. Remotive's API notice describes a 24-hour delay for API data; that statement is not assumed to apply to RSS, for which no separate freshness guarantee was found.
+* **Optional source preferences:** Both RSS collectors can optionally filter parsed RSS records using `.env` settings. `REMOTIVE_FEED_CATEGORIES` selects Remotive's upstream category feeds (blank means its general feed). For either source, `*_INCLUDE_TERMS` keeps a job when any semicolon-separated term occurs in title, description, type or category; `*_EXCLUDE_TERMS` removes a job if any listed term occurs there. `*_INCLUDE_CATEGORIES` matches an exact RSS category label, and `*_INCLUDE_LOCATIONS` matches a substring of the RSS location field. Values within one setting use OR; non-empty settings are combined with AND. Empty settings do not narrow results. These are source collection preferences, not changes to the private Vargas candidate/criteria profile. Jobspresso's current job-listing RSS does not document category/location/keyword parameters; testing `search_keywords`, `search_location` and `search_categories` query parameters showed the feed returned the same entries, so its optional filters run locally using RSS metadata only. No collector fetches job-detail HTML.
 * **`email_collector.py`**: Connects via IMAP to process unread LinkedIn and Remōt alert emails. LinkedIn URLs retain the existing anonymous public HTTPS scraping flow (without cookies or user login); redirects outside LinkedIn are rejected. Remōt links are accepted only from HTTPS `workremot.com` hosts (including its subdomains), normalized, and saved to SQLite. No Remōt page or external application URL is fetched. Emails are marked as read only after a supported listing URL is durably stored.
 * **Remōt alert format and description limit:** The repository does not contain a real Remōt alert sample or a verified email template. Its parser therefore finds official listing URLs in generic HTML or plain-text messages rather than assuming a specific sender or markup. Title/link-only alerts are stored as `DESCRIPTION_REQUIRED`, not placed in the evaluation inbox, and never sent to Vargas without job-description text. External links labeled as application links are stored separately for transparency when one listing and one application URL are unambiguous. Add the full job description (at least 100 characters and 15 words) with `python add_remot.py`; this promotes the saved alert to `NEW` and creates its inbox file. The Remōt alert's search is IMAP `UNSEEN BODY workremot.com`; providers that do not support standard IMAP `BODY` search may require a provider-specific query change.
 * The public listing's location and workplace-type metadata are appended to the job text when available. This gives the AI evidence to cite without granting it Internet access.
 * The We Work Remotely RSS collector accepts only We Work Remotely URLs. Links whose public pages are blocked, rate-limited, or lack a usable description stay in a `SCRAPE_PENDING` queue. Extraction tries the page description and structured `JobPosting` data; results need a minimum usable text length. Transient failures retry on later runs with exponential backoff. Confirmed HTTP 404/410 responses become `SCRAPE_UNAVAILABLE` and are no longer retried. Entries older than `SCRAPE_MAX_AGE_DAYS` (default: 30) are also retired, since old job postings are unlikely to remain actionable. There is no per-run job count limit.
 * Configure the Jobspresso feed URL with `JOBSPRESSO_FEED_URL` in `.env` if needed; its default is the job-listing RSS URL above. The pipeline reads that RSS feed on each run and does not crawl job detail pages.
+* Configure upstream Remotive category RSS feeds with `REMOTIVE_FEED_CATEGORIES`; blank means the general feed. The eight `REMOTIVE_*` / `JOBSPRESSO_*` include/exclude settings in `.env.example` are blank by default. Set only the preferences you want in your private, untracked `.env`; the schedule is unchanged. Jobspresso category and location filtering is limited to values present in its RSS entries, and no metadata means that a configured include filter will exclude that listing.
 * Schema upgrades do not backfill historical evaluated jobs into the scraping queue. A one-time repair restores their saved evaluation status and retires old unresolved entries (including legacy rows with at least three failed scrape attempts, missing/invalid dates, or age beyond the configured window) instead of triggering large batches of old requests. Newer transient failures continue retrying as before.
 
 
@@ -146,6 +149,7 @@ job-agent/
 ├── add_remot.py          # Manual description ingestion for saved Remōt alerts
 ├── collector.py          # RSS feed collector script
 ├── jobspresso_collector.py # Jobspresso RSS-only collector
+├── remotive_collector.py  # Remotive RSS-only collector
 ├── cover_letter.py       # Vargas cover-letter draft generator for APPLY jobs
 ├── email_collector.py    # IMAP reader and anonymous LinkedIn scraper
 ├── remot_parser.py       # Conservative Remōt alert-link parser
@@ -216,6 +220,12 @@ nano .env
 
 Fill in your Telegram Bot token, Chat ID, and IMAP email credentials.
 Set the private location allowlists in `.env`, for example by listing the countries accepted for remote work and the cities accepted for on-site or hybrid work. Do not commit these personal settings.
+The optional Remotive and Jobspresso source filters are also configured only in
+this local `.env`; their values are blank in `.env.example`, so the collectors
+remain unfiltered by default. These source filters do not replace or modify the
+private Vargas profile. The versioned `templates/candidate.md` and
+`templates/criteria.md` are generic starting points; keep personalized copies
+in the private active Vargas profile, not in the public repository.
 5. **Configure Agent Files:**
 Copy the template files from `templates/` into your Hermes profile directory and customize `candidate.md` with your real background.
 Before using cover-letter generation, synchronize the updated `templates/SOUL.md` with the private active Vargas profile. Follow your existing backup, hash-verification, and immutable-file procedure. Keep the real candidate profile and generated `cover_letters/` drafts private.
