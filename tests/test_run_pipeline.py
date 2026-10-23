@@ -94,7 +94,7 @@ class RunPipelineStageTests(unittest.TestCase):
                 patch.object(run_pipeline, "WRAPPER_SCRIPT", root / "wrapper.py"),
                 patch.object(run_pipeline, "DB_PATH", db_path),
                 patch.object(run_pipeline, "VENV_PYTHON", "python"),
-                patch.object(run_pipeline.subprocess, "run"),
+                patch.object(run_pipeline.subprocess, "run") as run_command,
                 patch(
                     "telegram_notify.deliver_pending_notifications",
                     return_value=0,
@@ -103,6 +103,12 @@ class RunPipelineStageTests(unittest.TestCase):
                 result = run_pipeline.run_pipeline()
 
         self.assertEqual(result, 1)
+        self.assertTrue(
+            any(
+                str(call.args[0][1]).endswith("jobspresso_collector.py")
+                for call in run_command.call_args_list
+            )
+        )
 
 
 if __name__ == "__main__":

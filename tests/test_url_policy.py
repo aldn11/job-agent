@@ -13,6 +13,8 @@ class UrlPolicyTests(unittest.TestCase):
             "https://www.weworkremotely.com/categories/jobs.rss",
             "https://workremot.com/jobs/example",
             "https://www.workremot.com/jobs/example",
+            "https://jobspresso.co/job/example",
+            "https://www.jobspresso.co/job/example",
         ):
             with self.subTest(url=url):
                 self.assertEqual(url_policy.validate_allowed_url(url), url)
@@ -26,6 +28,8 @@ class UrlPolicyTests(unittest.TestCase):
             "https://linkedin.com:444/jobs/view/123",
             "https://workremot.com.attacker.example/jobs/example",
             "https://workremot.com@attacker.example/jobs/example",
+            "https://jobspresso.co.attacker.example/job/example",
+            "https://jobspresso.co@attacker.example/job/example",
         ):
             with self.subTest(url=url):
                 with self.assertRaises(ValueError):

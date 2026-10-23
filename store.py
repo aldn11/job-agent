@@ -26,6 +26,8 @@ def job_key(url):
     if host == "workremot.com" or host.endswith(".workremot.com"):
         query = "&".join(sorted(p.query.split("&"))) if p.query else ""
         return "remot:" + path + (f"?{query}" if query else "")
+    if host == "jobspresso.co" or host.endswith(".jobspresso.co"):
+        return "jobspresso:" + path.lower()
     if host == "linkedin.com":
         m = re.search(r"/jobs/view/(?:[^/]*-)?(\d+)", path)
         if m:
