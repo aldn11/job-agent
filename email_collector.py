@@ -6,8 +6,10 @@ import time
 import urllib.request
 import re
 import os
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from bs4 import BeautifulSoup
@@ -23,6 +25,7 @@ BASE_DIR = Path(__file__).parent
 INBOX_DIR = BASE_DIR / "inbox"
 DB_PATH = BASE_DIR / "jobs.db"
 MAX_HTML_BYTES = 5 * 1024 * 1024
+MAX_DESCRIPTION_SCRAPE_ATTEMPTS = 5
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 EMAIL_USER = os.getenv("EMAIL_USER", "")
@@ -38,10 +41,13 @@ HEADERS = {
 
 
 class ScrapeError(RuntimeError):
-    def __init__(self, message, retry_after=0, permanent=False):
+    def __init__(
+        self, message, retry_after=0, permanent=False, manual_review_after_retries=False
+    ):
         super().__init__(message)
         self.retry_after = retry_after
         self.permanent = permanent
+        self.manual_review_after_retries = manual_review_after_retries
 
 
 def _job_posting_description(soup):
@@ -159,14 +165,20 @@ def fetch_public_job_text(url: str) -> dict:
         if len(description_text) < 100:
             description_text = _job_posting_description(soup)
         if len(description_text) < 100 or len(description_text.split()) < 15:
-            raise ScrapeError("A descrição extraída é curta demais para avaliação.")
+            raise ScrapeError(
+                "A descrição extraída é curta demais para avaliação.",
+                manual_review_after_retries=True,
+            )
         if re.search(
             r"captcha|security verification|unusual activity|access denied|"
             r"sign in to view|join linkedin",
             description_text,
             re.I,
         ):
-            raise ScrapeError("A resposta parece ser uma página de bloqueio, não uma descrição de vaga.")
+            raise ScrapeError(
+                "A resposta parece ser uma página de bloqueio, não uma descrição de vaga.",
+                manual_review_after_retries=True,
+            )
 
         return {
             "title": title,
@@ -192,6 +204,14 @@ def _message_html(msg):
         decoded = payload.decode(charset, errors="replace")
         (html_parts if content_type == "text/html" else text_parts).append(decoded)
     return "\n".join(html_parts or text_parts)
+
+
+def _decoded_header(msg, name):
+    value = msg.get(name, "")
+    try:
+        return str(make_header(decode_header(value))).strip()
+    except (LookupError, TypeError, UnicodeError):
+        return str(value).strip()
 
 
 def fetch_linkedin_emails():
@@ -237,6 +257,7 @@ def fetch_linkedin_emails():
             print("Nenhum e-mail de alerta não lido encontrado.")
 
         processed = 0
+        reviewed = 0
         email_errors = search_errors
         for e_id in email_ids:
             email_id = e_id.decode(errors="replace")
@@ -246,27 +267,62 @@ def fetch_linkedin_emails():
                     email_errors.append(f"Falha ao buscar o e-mail IMAP {email_id}.")
                     continue
                 parsed = 0
+                raw_message = b""
+                parsed_message = None
                 for response_part in msg_data:
                     if isinstance(response_part, tuple):
-                        msg = email.message_from_bytes(response_part[1])
-                        body = _message_html(msg)
+                        raw_message = response_part[1]
+                        parsed_message = email.message_from_bytes(raw_message)
+                        body = _message_html(parsed_message)
                         if body:
                             parsed += bool(parse_linkedin_jobs(body, conn))
                             parsed += persist_remot_jobs(body, conn)
                 if not parsed:
-                    email_errors.append(
-                        f"O e-mail IMAP {email_id} não contém anúncio suportado; "
-                        "permanece não lido."
+                    message_fingerprint = hashlib.sha256(
+                        raw_message or (b"imap-sequence:" + e_id)
+                    ).hexdigest()
+                    store.record_unrecognized_email(
+                        conn,
+                        message_fingerprint,
+                        email_id,
+                        message_id=(
+                            _decoded_header(parsed_message, "Message-ID")
+                            if parsed_message
+                            else ""
+                        ),
+                        sender=(
+                            _decoded_header(parsed_message, "From")
+                            if parsed_message
+                            else ""
+                        ),
+                        subject=(
+                            _decoded_header(parsed_message, "Subject")
+                            if parsed_message
+                            else ""
+                        ),
+                        sent_at=(
+                            _decoded_header(parsed_message, "Date")
+                            if parsed_message
+                            else ""
+                        ),
+                        reason="Nenhum anúncio LinkedIn ou Remōt reconhecido no corpo.",
                     )
-                    continue
                 conn.commit()
                 flag_status, _ = mail.store(e_id, "+FLAGS", "\\Seen")
                 if flag_status != "OK":
                     email_errors.append(
-                        f"Não foi possível marcar o e-mail {email_id} como lido."
+                        f"Registro persistido, mas não foi possível marcar o e-mail "
+                        f"{email_id} como lido."
                     )
                     continue
                 processed += 1
+                if not parsed:
+                    reviewed += 1
+                    print(
+                        f"[review] E-mail IMAP {email_id} sem anúncio suportado "
+                        "registrado na fila de revisão e marcado como lido; "
+                        "permanece na caixa de entrada."
+                    )
             except (
                 imaplib.IMAP4.error,
                 LookupError,
@@ -280,14 +336,18 @@ def fetch_linkedin_emails():
                 )
 
         if processed:
-            print(f"[+] Links de {processed} e-mails persistidos; e-mails marcados como lidos.")
+            print(
+                f"[+] {processed} e-mail(s) processado(s) e marcado(s) como lido(s); "
+                f"{reviewed} registrado(s) para revisão."
+            )
         process_pending_scrapes(conn)
         if email_errors:
             for error in email_errors:
                 print(f"[!] {error}")
             raise RuntimeError(
-                f"{len(email_errors)} e-mail(s) não puderam ser processados; "
-                "permanecem não lidos para nova tentativa."
+                f"{len(email_errors)} operação(ões) IMAP falharam; "
+                "mensagens sem confirmação de persistência/flag permanecem "
+                "disponíveis para nova tentativa."
             )
         return processed
     finally:
@@ -450,8 +510,14 @@ def process_pending_scrapes(db):
             title = job_data.get("title") or "Vaga LinkedIn"
             company = job_data.get("company") or "Empresa via LinkedIn"
             description = job_data["description"]
-            if len(description.strip()) < 100:
-                raise ScrapeError("A descrição extraída é curta demais para avaliação.")
+            if (
+                len(description.strip()) < 100
+                or len(description.split()) < 15
+            ):
+                raise ScrapeError(
+                    "A descrição extraída é curta demais para avaliação.",
+                    manual_review_after_retries=True,
+                )
 
             file_content = f"""SOURCE: LinkedIn Email Alert
 URL: {url}
@@ -489,6 +555,25 @@ WORKPLACE TYPE: {job_data.get("workplace_type") or "Not found"}
                 print(f"[!] Vaga indisponível permanentemente; retentativas encerradas: {error}")
                 continue
             next_attempts = attempts + 1
+            if (
+                isinstance(error, ScrapeError)
+                and error.manual_review_after_retries
+                and next_attempts >= MAX_DESCRIPTION_SCRAPE_ATTEMPTS
+            ):
+                db.execute(
+                    """UPDATE jobs SET status = 'SCRAPE_REVIEW',
+                       scrape_attempts = ?, scrape_last_error = ?,
+                       scrape_next_attempt = NULL
+                       WHERE key = ? AND status = 'SCRAPE_PENDING'""",
+                    (next_attempts, str(error)[:500], key),
+                )
+                db.commit()
+                print(
+                    f"[!] Descrição insuficiente após {next_attempts} tentativas; "
+                    "vaga enviada para revisão manual, sem novas retentativas "
+                    f"automáticas: {url}"
+                )
+                continue
             delay_seconds = max(
                 min(86400, 300 * (2 ** min(attempts, 8))),
                 getattr(error, "retry_after", 0),

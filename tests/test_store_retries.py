@@ -154,6 +154,9 @@ class StoreRetryTests(unittest.TestCase):
         notification_columns = {
             row[1] for row in db.execute("PRAGMA table_info(notifications)")
         }
+        review_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(email_review_queue)")
+        }
         status, = db.execute(
             "SELECT status FROM jobs WHERE id = ?", ("incomplete",)
         ).fetchone()
@@ -169,6 +172,13 @@ class StoreRetryTests(unittest.TestCase):
         self.assertTrue(
             {"alert_sent", "letter_sent", "next_attempt_at", "delivery_lease_until"}
             <= notification_columns
+        )
+        self.assertTrue(
+            {
+                "message_fingerprint", "imap_sequence_id", "message_id",
+                "sender", "subject", "sent_at", "reason", "recorded_at",
+            }
+            <= review_columns
         )
         self.assertEqual(status, "SCRAPE_UNAVAILABLE")
         self.assertEqual(old_status, "SCRAPE_UNAVAILABLE")
@@ -295,7 +305,7 @@ class StoreRetryTests(unittest.TestCase):
         self.assertEqual(statuses["null-date"], "SCRAPE_UNAVAILABLE")
         self.assertEqual(statuses["invalid-date"], "SCRAPE_UNAVAILABLE")
 
-    def test_backlog_migration_retires_repeatedly_failed_legacy_jobs(self):
+    def test_backlog_migration_does_not_retire_unknown_failure_reasons(self):
         db = store.connect(self.db_path)
         with db:
             db.execute(
@@ -327,7 +337,76 @@ class StoreRetryTests(unittest.TestCase):
             "SELECT status FROM jobs WHERE id = ?", ("repeated-failure",)
         ).fetchone()
         db.close()
-        self.assertEqual(status, "SCRAPE_UNAVAILABLE")
+        self.assertEqual(status, "SCRAPE_PENDING")
+
+    def test_migration_routes_known_exhausted_short_descriptions_to_review(self):
+        db = store.connect(self.db_path)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with db:
+            db.execute(
+                "DELETE FROM schema_migrations WHERE migration_id = ?",
+                ("review-exhausted-short-descriptions-v1",),
+            )
+            db.executemany(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status, scrape_attempts, scrape_last_error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        "linkedin:known-short",
+                        "known-short",
+                        "linkedin",
+                        "https://www.linkedin.com/jobs/view/116",
+                        "Company",
+                        "Short description",
+                        "fp-short",
+                        now,
+                        "SCRAPE_PENDING",
+                        5,
+                        "A descrição extraída é curta demais para avaliação.",
+                    ),
+                    (
+                        "linkedin:unknown-failure",
+                        "unknown-failure",
+                        "linkedin",
+                        "https://www.linkedin.com/jobs/view/117",
+                        "Company",
+                        "Unknown failure",
+                        "fp-unknown",
+                        now,
+                        "SCRAPE_PENDING",
+                        8,
+                        "Falha temporária de rede.",
+                    ),
+                    (
+                        "linkedin:below-threshold",
+                        "below-threshold",
+                        "linkedin",
+                        "https://www.linkedin.com/jobs/view/118",
+                        "Company",
+                        "Below threshold",
+                        "fp-below",
+                        now,
+                        "SCRAPE_PENDING",
+                        4,
+                        "A descrição extraída é curta demais para avaliação.",
+                    ),
+                ],
+            )
+        db.close()
+
+        db = store.connect(self.db_path)
+        statuses = dict(
+            db.execute(
+                """SELECT id, status FROM jobs
+                   WHERE id IN ('known-short', 'unknown-failure', 'below-threshold')"""
+            ).fetchall()
+        )
+        db.close()
+        self.assertEqual(statuses["known-short"], "SCRAPE_REVIEW")
+        self.assertEqual(statuses["unknown-failure"], "SCRAPE_PENDING")
+        self.assertEqual(statuses["below-threshold"], "SCRAPE_PENDING")
 
     def test_new_jobs_with_recent_dates_remain_in_scrape_queue(self):
         db = store.connect(self.db_path)

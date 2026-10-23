@@ -99,6 +99,18 @@ def connect(path=DB_PATH):
         last_error TEXT,
         created_at TEXT NOT NULL,
         sent_at TEXT)""")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS email_review_queue (
+            message_fingerprint TEXT PRIMARY KEY,
+            imap_sequence_id TEXT NOT NULL,
+            message_id TEXT,
+            sender TEXT,
+            subject TEXT,
+            sent_at TEXT,
+            reason TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )"""
+    )
     notification_columns = {
         row[1] for row in db.execute("PRAGMA table_info(notifications)").fetchall()
     }
@@ -133,7 +145,7 @@ def connect(path=DB_PATH):
         "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
         (stale_migration_id,),
     ).fetchone():
-        retired = retire_stale_pending_scrapes(db, include_failed_backlog=True)
+        retired = retire_stale_pending_scrapes(db)
         db.execute(
             "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
             (
@@ -147,10 +159,77 @@ def connect(path=DB_PATH):
                 f"[!] Migração: {retired} vaga(s) antigas ou sem data válida "
                 "foram retiradas da fila de scraping."
             )
+    review_migration_id = "review-exhausted-short-descriptions-v1"
+    if not db.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (review_migration_id,),
+    ).fetchone():
+        reviewed = transition_exhausted_short_description_scrapes(db)
+        db.execute(
+            "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+            (
+                review_migration_id,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        db.commit()
+        if reviewed:
+            print(
+                f"[!] Migração: {reviewed} vaga(s) com descrição curta após "
+                "5 tentativas foram encaminhadas para revisão manual."
+            )
     return db
 
 
-def retire_stale_pending_scrapes(db, include_failed_backlog=False):
+def transition_exhausted_short_description_scrapes(db, max_attempts=5):
+    """Move only known short-description failures to the manual-review queue."""
+    with db:
+        return db.execute(
+            """UPDATE jobs SET status = 'SCRAPE_REVIEW',
+               scrape_next_attempt = NULL
+               WHERE status = 'SCRAPE_PENDING'
+                 AND scrape_attempts >= ?
+                 AND scrape_last_error = ?""",
+            (
+                max_attempts,
+                "A descrição extraída é curta demais para avaliação.",
+            ),
+        ).rowcount
+
+
+def record_unrecognized_email(
+    db,
+    message_fingerprint,
+    imap_sequence_id,
+    *,
+    message_id="",
+    sender="",
+    subject="",
+    sent_at="",
+    reason,
+):
+    """Persist minimal metadata for an unsupported email before it is consumed."""
+    with db:
+        cursor = db.execute(
+            """INSERT OR IGNORE INTO email_review_queue
+               (message_fingerprint, imap_sequence_id, message_id, sender,
+                subject, sent_at, reason, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                message_fingerprint,
+                str(imap_sequence_id),
+                message_id[:998],
+                sender[:500],
+                subject[:998],
+                sent_at[:200],
+                reason[:500],
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def retire_stale_pending_scrapes(db):
     """Retire historical scrape work, including rows with unusable timestamps."""
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=SCRAPE_MAX_AGE_DAYS)
@@ -166,9 +245,8 @@ def retire_stale_pending_scrapes(db, include_failed_backlog=False):
                      OR trim(first_seen) = ''
                      OR julianday(first_seen) IS NULL
                      OR julianday(first_seen) < julianday(?)
-                     OR (? = 1 AND scrape_attempts >= 3)
                  )""",
-            (cutoff, int(include_failed_backlog)),
+            (cutoff,),
         ).rowcount
 
 
