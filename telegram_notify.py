@@ -5,8 +5,6 @@ import math
 import os
 import sys
 import sqlite3
-import uuid
-from pathlib import Path
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
@@ -17,10 +15,7 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
-if HERMES_TIMEOUT_SECONDS <= 0:
-    raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
-BASE_DIR = Path(__file__).parent
+NOTIFICATION_LEASE_SECONDS = 60
 
 def send_telegram_alert(evaluation_data: dict):
     score = evaluation_data.get("score")
@@ -108,36 +103,17 @@ def deliver_pending_notifications(db_path):
 
     failed = 0
     store.recover_expired_notifications(db_path)
-    for notification_id, payload, alert_sent, letter_sent in store.pending_notifications(db_path):
+    for notification_id, payload, alert_sent in store.pending_notifications(db_path):
         if not store.claim_notification(
-            notification_id, HERMES_TIMEOUT_SECONDS + 600, db_path
+            notification_id, NOTIFICATION_LEASE_SECONDS, db_path
         ):
             continue
         try:
             notification = json.loads(payload)
-            if notification.get("verdict") in ("APPLY", "MAYBE") and not notification.get("cover_letter"):
-                from cover_letter import generate_cover_letter, save_cover_letter
-
-                job_id = notification.get("job_id")
-                job_text = notification.get("job_text")
-                if not job_id or not job_text:
-                    job_id = store.notification_job_id(notification_id, db_path)
-                    if job_id:
-                        inbox_file = BASE_DIR / "inbox" / f"{job_id}.txt"
-                        if inbox_file.exists():
-                            job_text = inbox_file.read_text(encoding="utf-8")
-                if not job_id or not job_text:
-                    raise ValueError(
-                        "Dados insuficientes para gerar a carta desta vaga."
-                    )
-                letter = generate_cover_letter(job_text, notification)
-                save_cover_letter(job_id, letter, BASE_DIR / "cover_letters")
-                notification["cover_letter"] = letter
-                store.update_notification_payload(
-                    notification_id, notification, db_path
-                )
             if not alert_sent:
                 send_telegram_alert(notification)
+                store.mark_notification_alert_sent(notification_id, db_path)
+            else:
                 store.mark_notification_alert_sent(notification_id, db_path)
             print(f"[+] Notificação {notification_id} entregue ao Telegram.")
         except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:

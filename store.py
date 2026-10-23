@@ -426,7 +426,7 @@ def pending_notifications(path=DB_PATH):
     db = connect(path)
     try:
         return db.execute(
-            """SELECT id, payload, alert_sent, letter_sent FROM notifications
+            """SELECT id, payload, alert_sent FROM notifications
                WHERE status = 'PENDING'
                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                  AND (delivery_lease_until IS NULL OR delivery_lease_until <= ?)
@@ -447,7 +447,7 @@ def mark_notification_sent(notification_id, path=DB_PATH):
         with db:
             db.execute(
                 """UPDATE notifications
-                   SET status = 'SENT', alert_sent = 1, letter_sent = 1,
+                   SET status = 'SENT', alert_sent = 1,
                        sent_at = ?, last_error = NULL, delivery_lease_until = NULL
                    WHERE id = ?""",
                 (now, notification_id),
@@ -463,10 +463,8 @@ def mark_notification_alert_sent(notification_id, path=DB_PATH):
         with db:
             db.execute(
                 """UPDATE notifications
-                   SET alert_sent = 1,
-                       status = CASE WHEN letter_sent = 1 THEN 'SENT' ELSE status END,
-                       sent_at = CASE WHEN letter_sent = 1 THEN ? ELSE sent_at END,
-                       last_error = NULL
+                   SET status = 'SENT', alert_sent = 1,
+                       sent_at = ?, last_error = NULL, delivery_lease_until = NULL
                    WHERE id = ? AND status = 'PENDING'""",
                 (now, notification_id),
             )
