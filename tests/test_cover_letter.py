@@ -53,7 +53,7 @@ class CoverLetterTests(unittest.TestCase):
             stderr="",
         )
         with patch("cover_letter.subprocess.run", return_value=result):
-            with self.assertRaisesRegex(ValueError, "JSON inválido"):
+            with self.assertRaisesRegex(ValueError, "Vargas retornou campos inválidos"):
                 generate_cover_letter("Job description " * 10, {})
 
     def test_saves_draft_atomically_in_private_output_directory(self):

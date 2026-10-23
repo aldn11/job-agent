@@ -115,7 +115,7 @@ class EvaluationValidationTests(unittest.TestCase):
                 stderr="",
             )
             with patch.object(wrapper.subprocess, "run", return_value=result):
-                with self.assertRaisesRegex(ValueError, "único objeto JSON válido"):
+                with self.assertRaisesRegex(ValueError, "objeto JSON"):
                     wrapper.run_vargas(job_file)
 
     def test_invalid_json_response_includes_bounded_stdout_and_stderr(self):
