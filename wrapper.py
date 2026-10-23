@@ -48,7 +48,19 @@ def _diagnostic_output(value):
     if not text:
         return "(vazio)"
     if len(text) > HERMES_DIAGNOSTIC_LIMIT:
-        return text[:HERMES_DIAGNOSTIC_LIMIT] + "\n...[saída truncada]"
+        omitted = len(text) - HERMES_DIAGNOSTIC_LIMIT
+        marker = f"\n...[{omitted} caracteres omitidos]...\n"
+        while True:
+            available = HERMES_DIAGNOSTIC_LIMIT - len(marker)
+            omitted = len(text) - available
+            updated_marker = f"\n...[{omitted} caracteres omitidos]...\n"
+            if updated_marker == marker:
+                break
+            marker = updated_marker
+        head_size = (available + 1) // 2
+        tail_size = available - head_size
+        tail = text[-tail_size:] if tail_size else ""
+        return text[:head_size] + marker + tail
     return text
 
 
@@ -255,7 +267,19 @@ def run_vargas(job_file_path: Path) -> dict:
     try:
         parsed = json.loads(raw_output)
     except (json.JSONDecodeError, RecursionError) as error:
-        raise ValueError("Vargas não retornou um único objeto JSON válido.") from error
+        if isinstance(error, json.JSONDecodeError):
+            parse_location = (
+                f" posição {error.pos} (linha {error.lineno}, coluna {error.colno})"
+            )
+        else:
+            parse_location = ""
+        raise ValueError(
+            "Hermes terminou com código de saída 0, mas stdout não contém "
+            "um único objeto JSON válido"
+            f"{parse_location}.\n"
+            f"stderr:\n{_diagnostic_output(res.stderr)}\n"
+            f"stdout:\n{_diagnostic_output(res.stdout)}"
+        ) from error
     return validate_evaluation_data(parsed, job_text)
 
 def calculate_score_and_verdict(vargas_data: dict, job_text: str = "") -> dict:
