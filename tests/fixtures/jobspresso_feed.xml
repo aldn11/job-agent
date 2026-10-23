@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Jobs - Jobspresso</title>
+    <item>
+      <title>Customer Support Specialist</title>
+      <link>https://www.jobspresso.co/job/customer-support-specialist/?utm_source=rss</link>
+      <dc:creator><![CDATA[Example Company<br>⚲&nbsp;Worldwide]]></dc:creator>
+      <pubDate>Thu, 22 Oct 2026 18:25:13 +0000</pubDate>
+      <description><![CDATA[Short feed summary only.]]></description>
+      <content:encoded><![CDATA[
+        <p>Example Company builds practical tools for distributed teams and is
+        looking for a customer support specialist to help customers succeed.</p>
+        <p>You will answer customer questions, investigate product issues,
+        document clear steps, and work with product and engineering colleagues.</p>
+        <p>The role requires careful written communication, sound judgment,
+        patience, and the ability to manage several support conversations.</p>
+        <p>Experience with customer support software and remote collaboration
+        is helpful. You will contribute to a respectful, reliable customer
+        experience while sharing recurring feedback with the wider team.</p>
+        <p>The post Customer Support Specialist appeared first on Jobspresso.</p>
+      ]]></content:encoded>
+    </item>
+    <item>
+      <title>Duplicate RSS entry</title>
+      <link>https://jobspresso.co/job/customer-support-specialist/</link>
+      <dc:creator><![CDATA[Another Company]]></dc:creator>
+      <pubDate>Thu, 22 Oct 2026 18:25:13 +0000</pubDate>
+      <content:encoded><![CDATA[
+        <p>Another full listing body that should not replace the first
+        canonical result. It has enough words to pass validation but is a
+        duplicate of the canonical URL in this fixture.</p>
+        <p>Customer service teams work together remotely to resolve issues,
+        document useful answers, and communicate clearly with customers.</p>
+      ]]></content:encoded>
+    </item>
+    <item>
+      <title>Fake host listing</title>
+      <link>https://jobspresso.co.attacker.example/job/fake/</link>
+      <dc:creator><![CDATA[Fake Company]]></dc:creator>
+      <pubDate>Thu, 22 Oct 2026 18:25:13 +0000</pubDate>
+      <content:encoded><![CDATA[
+        <p>This hostile host entry has a long enough description but must
+        never be persisted by the Jobspresso collector.</p>
+        <p>Only trusted feed items are kept after strict host validation.</p>
+      ]]></content:encoded>
+    </item>
+    <item>
+      <title>Incomplete description</title>
+      <link>https://jobspresso.co/job/short-description/</link>
+      <dc:creator><![CDATA[Example Company]]></dc:creator>
+      <pubDate>Thu, 22 Oct 2026 18:25:13 +0000</pubDate>
+      <content:encoded><![CDATA[<p>Not enough information.</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>

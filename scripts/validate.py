@@ -15,6 +15,7 @@ COMPONENT_TESTS = {
     "remot_parser.py": "test_remot_parser.py",
     "list_jobs.py": "test_list_jobs.py",
     "location_policy.py": "test_location_policy.py",
+    "jobspresso_collector.py": "test_jobspresso_collector.py",
     "run_pipeline.py": "test_run_pipeline.py",
     "store.py": "test_store_retries.py",
     "telegram_notify.py": "test_notifications.py",
