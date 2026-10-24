@@ -264,6 +264,13 @@ def run_vargas(job_file_path: Path) -> dict:
         raise RuntimeError(_process_failure_details(error)) from error
 
     raw_output = res.stdout.strip()
+    if raw_output.startswith("```"):
+        lines = raw_output.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw_output = "\n".join(lines).strip()
     try:
         parsed = json.loads(raw_output)
     except (json.JSONDecodeError, RecursionError) as error:
