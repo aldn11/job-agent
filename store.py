@@ -94,7 +94,6 @@ def connect(path=DB_PATH):
         payload TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'PENDING',
         alert_sent INTEGER NOT NULL DEFAULT 0,
-        letter_sent INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
         created_at TEXT NOT NULL,
@@ -114,7 +113,7 @@ def connect(path=DB_PATH):
     notification_columns = {
         row[1] for row in db.execute("PRAGMA table_info(notifications)").fetchall()
     }
-    for column in ("alert_sent", "letter_sent"):
+    for column in ("alert_sent",):
         if column not in notification_columns:
             db.execute(
                 f"ALTER TABLE notifications ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
@@ -465,27 +464,6 @@ def mark_notification_alert_sent(notification_id, path=DB_PATH):
                 """UPDATE notifications
                    SET status = 'SENT', alert_sent = 1,
                        sent_at = ?, last_error = NULL, delivery_lease_until = NULL
-                   WHERE id = ? AND status = 'PENDING'""",
-                (now, notification_id),
-            )
-    finally:
-        db.close()
-
-
-def mark_notification_letter_sent(notification_id, path=DB_PATH):
-    db = connect(path)
-    try:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with db:
-            db.execute(
-                """UPDATE notifications
-                   SET letter_sent = 1,
-                       status = CASE WHEN alert_sent = 1 THEN 'SENT' ELSE status END,
-                       sent_at = CASE WHEN alert_sent = 1 THEN ? ELSE sent_at END,
-                       delivery_lease_until = CASE
-                           WHEN alert_sent = 1 THEN NULL ELSE delivery_lease_until
-                       END,
-                       last_error = NULL
                    WHERE id = ? AND status = 'PENDING'""",
                 (now, notification_id),
             )

@@ -170,7 +170,7 @@ class StoreRetryTests(unittest.TestCase):
             <= job_columns
         )
         self.assertTrue(
-            {"alert_sent", "letter_sent", "next_attempt_at", "delivery_lease_until"}
+            {"alert_sent", "next_attempt_at", "delivery_lease_until"}
             <= notification_columns
         )
         self.assertTrue(
