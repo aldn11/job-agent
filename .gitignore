@@ -17,5 +17,4 @@ pipeline.log
 
 # Caixa de entrada temporária e backups
 inbox/
-cover_letters/
 wrapper-backup-*/

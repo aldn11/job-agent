@@ -129,7 +129,7 @@ class NotificationOutboxTests(unittest.TestCase):
                 {"verdict": "MAYBE", "score": None}
             )
 
-    def test_apply_delivery_sends_only_text_alert(self):
+    def test_apply_delivery_sends_one_text_alert(self):
         store.save_evaluation(
             "short123",
             {
@@ -145,25 +145,16 @@ class NotificationOutboxTests(unittest.TestCase):
                 "job_text": "JOB TEXT:\nSupport role. " * 10,
             },
         )
-        sent_payloads = []
         with patch.object(
             telegram_notify,
             "send_telegram_alert",
-            side_effect=lambda payload: sent_payloads.append(payload.copy()),
         ) as send_alert:
             self.assertEqual(
                 telegram_notify.deliver_pending_notifications(self.db_path), 0
             )
 
         send_alert.assert_called_once()
-        self.assertNotIn("cover_letter", sent_payloads[0])
         self.assertEqual(store.notification_counts(self.db_path)["SENT"], 1)
-        db = store.connect(self.db_path)
-        letter_sent, = db.execute(
-            "SELECT letter_sent FROM notifications"
-        ).fetchone()
-        db.close()
-        self.assertEqual(letter_sent, 0)
 
     def test_alert_text_is_sent_in_full_in_a_text_message(self):
         class Response:

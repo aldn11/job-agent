@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_TESTS = {
     "add_linkedin.py": "test_add_linkedin.py",
     "add_remot.py": "test_add_remot.py",
+    "bairesdev_collector.py": "test_bairesdev_collector.py",
     "collector.py": "test_collector.py",
-    "cover_letter.py": "test_cover_letter.py",
     "email_collector.py": "test_email_collector.py",
     "feed_filters.py": "test_feed_filters.py",
     "remot_parser.py": "test_remot_parser.py",

@@ -19,7 +19,7 @@ Searching for relevant job opportunities requires manually screening hundreds of
 1. **Filters Out Noise:** Automatically ingests LinkedIn job alerts and RSS feeds, applying regex pattern filtering, keyword inclusion/exclusion rules, and SHA-256 fingerprint deduplication.
 2. **Factual AI Extraction:** Sends raw job descriptions to a local agent (Hermes Agent) instructed under strict guidelines (ASD-STE100 technical English) to extract pure facts without hallucinations (mandatory requirements, nice-to-haves, location, seniority, and required language proficiency).
 3. **Deterministic Score Calculation:** Applies a strict mathematical scoring formula in Python over the extracted facts, delivering deterministic match scores (0 to 100) and actionable verdicts (`APPLY`, `MAYBE`, or `SKIP`).
-4. **Real-Time Alerts:** Sends formatted Telegram notifications for recommended openings, with a cover-letter draft attached for `APPLY` jobs.
+4. **Real-Time Alerts:** Sends formatted Telegram notifications for recommended openings.
 
 ---
 
@@ -56,17 +56,11 @@ Searching for relevant job opportunities requires manually screening hundreds of
                   │      wrapper.py      │ ── Deterministic Engine
                   │  (Score Calculation) │    (0-100 Score & Verdict)
                   └───────────┬──────────┘
-                              │ APPLY: Draft letter
-                              ▼
-                  ┌──────────────────────┐
-                  │  cover_letter.py     │ ◄── Private candidate profile
-                  │  (Draft only)        │
-                  └───────────┬──────────┘
-                              │ APPLY draft + APPLY/MAYBE alert
+                              │ APPLY / MAYBE
                               ▼
                   ┌──────────────────────┐
                   │ telegram_notify.py   │
-                  │ (Alert + .txt file)  │
+                  │ (Text alert)         │
                   └──────────────────────┘
 
 ```
@@ -79,6 +73,7 @@ Searching for relevant job opportunities requires manually screening hundreds of
 * **`collector.py`**: Ingests the public We Work Remotely RSS feed, applying inclusion/exclusion lists and text normalization.
 * **`jobspresso_collector.py`**: Ingests only the public Jobspresso job-listing RSS feed (`https://jobspresso.co/feed/?post_type=job_listing`); it does not fetch listing pages. It reads `content:encoded` (or RSS `description` as fallback), and records company/location from RSS creator metadata and publication time from `pubDate`. Only HTTPS links on `jobspresso.co` and its subdomains are accepted; duplicate entries are normalized before SQLite persistence. Descriptions shorter than 100 characters or 15 words are skipped. Publication date and location are recorded outside the `JOB TEXT` section; the complete feed content remains untrusted data within Vargas's existing `BEGIN`/`END` prompt boundary.
 * **`remotive_collector.py`**: Ingests only Remotive's public RSS XML at `https://remotive.com/remote-jobs/feed` (`https://remotive.com/feed` currently returns 404). It stores the original Remotive listing URL and credits Remotive in the inbox text and alert source; it does not crawl listing HTML or submit/relist jobs on third-party job boards. The resulting evaluation and private Telegram alert remain within the user's personal workflow. RSS entries include title, job ID, company, location, job type, category, publication date and HTML description. Descriptions need at least 100 characters and 15 words; prompt boundary lines from RSS are neutralized. Remotive's API notice describes a 24-hour delay for API data; that statement is not assumed to apply to RSS, for which no separate freshness guarantee was found.
+* **`bairesdev_collector.py`**: Reads active support-role data embedded in the public careers landing page at `https://talent.bairesdev.com/`. It does not access the applicant portal or fetch individual application pages. The collector validates the embedded widget configuration, keeps only active jobs with official BairesDev application URLs and complete descriptions, and applies the same support-role title filter as We Work Remotely. Location variants sharing one application URL are consolidated, with each listed region retained as metadata. The embedded page data is not an RSS feed and may change format; missing or invalid listing data raises an explicit error rather than being treated as an empty feed.
 * **Optional source preferences:** Both RSS collectors can optionally filter parsed RSS records using `.env` settings. `REMOTIVE_FEED_CATEGORIES` selects Remotive's upstream category feeds (blank means its general feed). For either source, `*_INCLUDE_TERMS` keeps a job when any semicolon-separated term occurs in title, description, type or category; `*_EXCLUDE_TERMS` removes a job if any listed term occurs there. `*_INCLUDE_CATEGORIES` matches an exact RSS category label, and `*_INCLUDE_LOCATIONS` matches a substring of the RSS location field. Values within one setting use OR; non-empty settings are combined with AND. Empty settings do not narrow results. These are source collection preferences, not changes to the private Vargas candidate/criteria profile. Jobspresso's current job-listing RSS does not document category/location/keyword parameters; testing `search_keywords`, `search_location` and `search_categories` query parameters showed the feed returned the same entries, so its optional filters run locally using RSS metadata only. No collector fetches job-detail HTML.
 * **`email_collector.py`**: Connects via IMAP and searches for unread (`UNSEEN`) LinkedIn and Remōt alert emails only; message bodies are fetched with `BODY.PEEK[]`, so inspection does not mark them read. LinkedIn URLs retain the existing anonymous public HTTPS scraping flow (without cookies or user login); redirects outside LinkedIn are rejected. Remōt links are accepted only from HTTPS `workremot.com` hosts (including its subdomains), normalized, and saved to SQLite. No Remōt page or external application URL is fetched. An email containing a supported listing is marked read only after the listing is durably persisted. An unread message with no supported listing has minimal headers (Message-ID, sender, subject and date), a reason, and a SHA-256 fingerprint recorded in SQLite `email_review_queue`; only after that record is committed is the message marked read. The original message remains in the mailbox for manual review. Fetch or persistence failures remain unread for retry. Review entries can be inspected with `sqlite3 jobs.db "SELECT recorded_at, message_id, sender, subject, reason FROM email_review_queue ORDER BY recorded_at DESC;"`.
 * **Remōt alert format and description limit:** The repository does not contain a real Remōt alert sample or a verified email template. Its parser therefore finds official listing URLs in generic HTML or plain-text messages rather than assuming a specific sender or markup. Title/link-only alerts are stored as `DESCRIPTION_REQUIRED`, not placed in the evaluation inbox, and never sent to Vargas without job-description text. External links labeled as application links are stored separately for transparency when one listing and one application URL are unambiguous. Add the full job description (at least 100 characters and 15 words) with `python add_remot.py`; this promotes the saved alert to `NEW` and creates its inbox file. The Remōt alert's search is IMAP `UNSEEN BODY workremot.com`; providers that do not support standard IMAP `BODY` search may require a provider-specific query change.
@@ -108,17 +103,12 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 * Location eligibility is decided in Python from an exact quote that must also occur in the ingested job text. Explicitly incompatible locations are rejected; missing or ambiguous location evidence forces `MAYBE`.
 * The complete AI response is validated against the expected schema, enum values, types and exact job-text citations. Invalid, incomplete or malformed evaluations stay pending and do not create Telegram alerts. URL-only inbox files are rejected before calling the AI.
 * Every due `NEW` job is evaluated without a per-run limit. Jobs and Telegram notifications are atomically claimed in SQLite to prevent overlapping pipeline runs from processing the same item; expired claims are recovered, and failed/incomplete evaluations retry with exponential backoff and no maximum attempt count.
-* Hermes evaluation and cover-letter generation use `HERMES_TIMEOUT_SECONDS` (default: 1800 seconds); IMAP operations use `IMAP_TIMEOUT_SECONDS` (default: 120 seconds). Telegram delivery failures also retry with exponential backoff; confirmed message/document stages are not sent again. A crash after Telegram accepts a message but before Vargas records confirmation can still result in a duplicate after lease recovery.
+* Hermes evaluation uses `HERMES_TIMEOUT_SECONDS` (default: 1800 seconds); IMAP operations use `IMAP_TIMEOUT_SECONDS` (default: 120 seconds). Telegram delivery failures retry with exponential backoff. A crash after Telegram accepts a message but before Vargas records confirmation can still result in a duplicate after lease recovery.
 * Private location allowlists are configured with `ALLOWED_REMOTE_COUNTRIES` and `ALLOWED_ONSITE_LOCATIONS` in `.env`. Separate multiple values with semicolons. Keep personal location details out of the public repository.
 * Automatically triggers Hard Rejects if the job requires incompatible country residency, mandatory native language fluency, or excessive seniority.
 
-5. **Cover Letter Drafts:**
-* For every notified `APPLY` or `MAYBE` job, Vargas creates a job-specific cover letter in the language of the job posting using facts from the private candidate profile and the job description.
-* Drafts use placeholder contact details, are saved under the ignored `cover_letters/` directory, and are sent as a `.txt` document immediately after the full Telegram text alert.
-* Vargas prepares drafts only. It never submits an application or sends a message to an employer.
-
-6. **Telegram Notifications:**
-* Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. The full alert uses Telegram `sendMessage`; the cover-letter file is sent separately so Telegram caption limits cannot truncate the message. Failed delivery stages remain pending and are retried without resending stages already acknowledged by Telegram.
+5. **Telegram Notifications:**
+* Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. Alerts use Telegram `sendMessage`; failed deliveries remain pending and are retried with exponential backoff.
 
 
 
@@ -127,7 +117,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 ##  Security & Engineering Highlights
 
 * **Decoupled Responsibilities:** The LLM is used strictly for natural language understanding and fact extraction. Numerical scoring and final verdicts are 100% governed by deterministic Python code.
-* **Malformed JSON Handling:** Invalid or excessively nested model output is treated as a failed evaluation or draft; corrupt legacy evaluations are retired without aborting the database migration. Evaluation validation remains strict: `hard_reject_flags` must use the exact documented enum codes, and `location_evidence` / requirement quotes must occur literally in the job text. Failure diagnostics report the invalid flag or rejected evidence without weakening these checks. Hermes non-zero exits and timeouts include bounded stdout/stderr excerpts to help diagnose the container/profile runtime.
+* **Malformed JSON Handling:** Invalid or excessively nested model output is treated as a failed evaluation; corrupt legacy evaluations are retired without aborting the database migration. Evaluation validation remains strict: `hard_reject_flags` must use the exact documented enum codes, and `location_evidence` / requirement quotes must occur literally in the job text. Failure diagnostics report the invalid flag or rejected evidence without weakening these checks. Hermes non-zero exits and timeouts include bounded stdout/stderr excerpts to help diagnose the container/profile runtime.
 * **Prompt Injection Protection:** Job description text is isolated as untrusted data between `BEGIN` and `END` blocks. If prompt injection attempts are detected within a job listing, the system records `prompt_injection_detected: true` and downgrades the job.
 * **Anonymous Ingestion:** No personal LinkedIn cookies or session tokens are used during job scraping.
 * **Environment Isolation:** Secrets, tokens, and API keys are stored in an untracked `.env` file.
@@ -150,7 +140,7 @@ job-agent/
 ├── collector.py          # RSS feed collector script
 ├── jobspresso_collector.py # Jobspresso RSS-only collector
 ├── remotive_collector.py  # Remotive RSS-only collector
-├── cover_letter.py       # Vargas cover-letter draft generator for APPLY jobs
+├── bairesdev_collector.py # BairesDev public careers-page collector
 ├── email_collector.py    # IMAP reader and anonymous LinkedIn scraper
 ├── remot_parser.py       # Conservative Remōt alert-link parser
 ├── list_jobs.py          # Terminal viewer for recommended jobs
@@ -228,7 +218,7 @@ private Vargas profile. The versioned `templates/candidate.md` and
 in the private active Vargas profile, not in the public repository.
 5. **Configure Agent Files:**
 Copy the template files from `templates/` into your Hermes profile directory and customize `candidate.md` with your real background.
-Before using cover-letter generation, synchronize the updated `templates/SOUL.md` with the private active Vargas profile. Follow your existing backup, hash-verification, and immutable-file procedure. Keep the real candidate profile and generated `cover_letters/` drafts private.
+Keep the real candidate profile in the private active Vargas profile. Do not copy personal candidate data into this public repository.
 
 ### 3. Running the Pipeline
 
