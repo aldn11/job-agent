@@ -1,4 +1,5 @@
 import copy
+import json
 import subprocess
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import wrapper
+import store
 from wrapper import calculate_score_and_verdict, validate_evaluation_data
 
 
@@ -117,6 +119,110 @@ class EvaluationValidationTests(unittest.TestCase):
             with patch.object(wrapper.subprocess, "run", return_value=result):
                 with self.assertRaisesRegex(ValueError, "objeto JSON"):
                     wrapper.run_vargas(job_file)
+
+    def test_prompt_truncates_description_and_records_usage_estimates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_file = root / "job123.txt"
+            job_file.write_text(
+                "SOURCE: LinkedIn\n"
+                "URL: https://www.linkedin.com/jobs/view/123\n"
+                "JOB TEXT:\n"
+                + "Support users and resolve technical issues. " * 20
+                + "TAIL_SENTINEL",
+                encoding="utf-8",
+            )
+            response_data = copy.deepcopy(self.evaluation)
+            response_data["location_evidence"] = ""
+            response = json.dumps(response_data)
+            result = subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout=response,
+                stderr="",
+            )
+            with (
+                patch.object(wrapper, "MAX_JOB_DESCRIPTION_CHARS", 120),
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(
+                    wrapper.subprocess, "run", return_value=result
+                ) as run_command,
+            ):
+                wrapper.run_vargas(job_file)
+
+            prompt = run_command.call_args.kwargs["input"]
+            db = store.connect(root / "jobs.db")
+            usage = db.execute(
+                """SELECT job_id, prompt_chars, input_tokens_estimate,
+                          response_chars, output_tokens_estimate, outcome
+                   FROM ai_usage"""
+            ).fetchone()
+            db.close()
+
+        self.assertIn("[Descrição truncada pelo limite", prompt)
+        self.assertNotIn("TAIL_SENTINEL", prompt)
+        self.assertEqual(
+            usage,
+            (
+                "job123",
+                len(prompt),
+                (len(prompt) + 3) // 4,
+                len(response),
+                (len(response) + 3) // 4,
+                "success",
+            ),
+        )
+
+    def test_missing_description_is_rejected_before_hermes_call(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_file = Path(temp_dir) / "empty.txt"
+            job_file.write_text("JOB TEXT:\n", encoding="utf-8")
+            with patch.object(wrapper.subprocess, "run") as run_command:
+                with self.assertRaisesRegex(ValueError, "ausente ou curta demais"):
+                    wrapper.run_vargas(job_file)
+        run_command.assert_not_called()
+
+    def test_invalid_url_is_rejected_before_hermes_call(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_file = Path(temp_dir) / "invalid-url.txt"
+            job_file.write_text(
+                "URL: javascript:alert(1)\n"
+                "JOB TEXT:\n"
+                + "Support users and resolve technical issues. " * 5,
+                encoding="utf-8",
+            )
+            with patch.object(wrapper.subprocess, "run") as run_command:
+                with self.assertRaisesRegex(ValueError, "URL da vaga inválida"):
+                    wrapper.run_vargas(job_file)
+        run_command.assert_not_called()
+
+    def test_provider_quota_error_is_recorded_and_classified(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_file = root / "job123.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            quota_error = subprocess.CalledProcessError(
+                1,
+                ["docker", "exec"],
+                output="",
+                stderr="HTTP 429 RESOURCE_EXHAUSTED",
+            )
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(
+                    wrapper.subprocess, "run", side_effect=quota_error
+                ),
+            ):
+                with self.assertRaises(wrapper.ProviderQuotaExceeded):
+                    wrapper.run_vargas(job_file)
+
+            db = store.connect(root / "jobs.db")
+            usage = db.execute(
+                "SELECT outcome, error_type FROM ai_usage"
+            ).fetchone()
+            db.close()
+
+        self.assertEqual(usage, ("quota_exhausted", "provider_quota"))
 
     def test_invalid_json_response_includes_bounded_stdout_and_stderr(self):
         with tempfile.TemporaryDirectory() as temp_dir:

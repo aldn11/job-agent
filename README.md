@@ -92,6 +92,10 @@ Searching for relevant job opportunities requires manually screening hundreds of
 3. **Factual AI Screening:**
 * **`wrapper.py`** triggers the local Hermes Agent Docker container.
 * The LLM parses `SOUL.md` (persona), `criteria.md` (ASD-STE100 extraction rules), and `candidate.md` (anonymized candidate profile) to produce a structured JSON factual breakdown.
+* Before starting Hermes, the pipeline checks for a valid HTTPS job URL (when supplied) and a usable description (at least 100 characters and 15 words). Invalid URLs go to `INPUT_REVIEW`; missing/short LinkedIn descriptions return to `SCRAPE_PENDING`; other sources go to `SCRAPE_REVIEW`. These jobs do not consume an AI call.
+* Collectors deduplicate canonical job URLs before evaluation. Manual entries also deduplicate by URL, or by exact company, title and pasted text when no URL is supplied. Company/title-only matches remain labeled as possible duplicates instead of being discarded, because that heuristic can hide distinct openings.
+* `MAX_JOB_DESCRIPTION_CHARS` limits the description sent to Vargas (default: 12000). Longer descriptions are truncated at the end, and Vargas is told not to infer facts from omitted text. The default can be changed in `.env`.
+* Each Hermes attempt adds a privacy-preserving row to the SQLite `ai_usage` table with model label, prompt/response character counts, token estimates, outcome and error type. The estimates use 4 characters per token and are not provider billing totals; see [`docs/uso-economia-tokens.md`](docs/uso-economia-tokens.md).
 
 
 4. **Deterministic Python Scoring:**
@@ -102,7 +106,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 * Location eligibility is decided in Python from an exact quote that must also occur in the ingested job text. Explicitly incompatible locations are rejected; missing or ambiguous location evidence forces `MAYBE`.
 * The complete AI response is validated against the expected schema, enum values, types and exact job-text citations. Invalid, incomplete or malformed evaluations stay pending and do not create Telegram alerts. URL-only inbox files are rejected before calling the AI.
-* Every due `NEW` job is evaluated without a per-run limit. Jobs and Telegram notifications are atomically claimed in SQLite to prevent overlapping pipeline runs from processing the same item; expired claims are recovered, and failed/incomplete evaluations retry with exponential backoff and no maximum attempt count.
+* Every due `NEW` job is evaluated without a per-run count limit. Jobs and Telegram notifications are atomically claimed in SQLite to prevent overlapping pipeline runs from processing the same item; expired claims are recovered, and failed evaluations retry with exponential backoff. On a recognized AI quota/rate-limit response, the current job waits for `AI_QUOTA_RETRY_SECONDS` (default: 86400) and the pipeline stops sending additional evaluations during that run.
 * Hermes evaluation uses `HERMES_TIMEOUT_SECONDS` (default: 1800 seconds); IMAP operations use `IMAP_TIMEOUT_SECONDS` (default: 120 seconds). Telegram delivery failures retry with exponential backoff. A crash after Telegram accepts a message but before Vargas records confirmation can still result in a duplicate after lease recovery.
 * Private location allowlists are configured with `ALLOWED_REMOTE_COUNTRIES` and `ALLOWED_ONSITE_LOCATIONS` in `.env`. Separate multiple values with semicolons. Keep personal location details out of the public repository.
 * Automatically triggers Hard Rejects if the job requires incompatible country residency, mandatory native language fluency, or excessive seniority.
@@ -118,6 +122,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 * **Decoupled Responsibilities:** The LLM is used strictly for natural language understanding and fact extraction. Numerical scoring and final verdicts are 100% governed by deterministic Python code.
 * **Malformed JSON Handling:** Invalid or excessively nested model output is treated as a failed evaluation; corrupt legacy evaluations are retired without aborting the database migration. Evaluation validation remains strict: `hard_reject_flags` must use the exact documented enum codes, and `location_evidence` / requirement quotes must occur literally in the job text. Failure diagnostics report the invalid flag or rejected evidence without weakening these checks. Hermes non-zero exits and timeouts include bounded stdout/stderr excerpts to help diagnose the container/profile runtime.
+* **AI cost visibility:** `ai_usage` stores character counts and clearly labeled token estimates, not job text or model output. Provider usage dashboards remain the source of truth for billed tokens.
 * **Prompt Injection Protection:** Job description text is isolated as untrusted data between `BEGIN` and `END` blocks. If prompt injection attempts are detected within a job listing, the system records `prompt_injection_detected: true` and downgrades the job.
 * **Anonymous Ingestion:** No personal LinkedIn cookies or session tokens are used during job scraping.
 * **Environment Isolation:** Secrets, tokens, and API keys are stored in an untracked `.env` file.
@@ -132,6 +137,8 @@ job-agent/
 ├── .gitignore            # Git ignore rules (database, logs, .env)
 ├── LICENSE               # MIT Open Source License
 ├── README.md             # Technical project documentation
+├── docs/
+│   └── uso-economia-tokens.md # AI usage estimates, queries and filter guidance
 ├── requirements.txt      # Locked Python dependencies
 ├── scripts/
 │   └── validate.py       # Syntax check and complete offline test suite
