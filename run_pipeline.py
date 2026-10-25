@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 import store
+import wrapper
 
 load_dotenv()
 
@@ -15,15 +16,34 @@ INBOX_DIR = BASE_DIR / "inbox"
 WRAPPER_SCRIPT = BASE_DIR / "wrapper.py"
 DB_PATH = BASE_DIR / "jobs.db"
 HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
+AI_QUOTA_RETRY_SECONDS = int(os.getenv("AI_QUOTA_RETRY_SECONDS", "86400"))
+STAGE_QUOTA_EXHAUSTED = "quota_exhausted"
 if HERMES_TIMEOUT_SECONDS <= 0:
     raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
+if AI_QUOTA_RETRY_SECONDS <= 0:
+    raise ValueError("AI_QUOTA_RETRY_SECONDS precisa ser maior que zero.")
 
 def run_stage(label, command, failures, timeout=None):
     print(f"\n=== {label} ===")
     try:
         subprocess.run(command, check=True, timeout=timeout)
         return True
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+    except subprocess.CalledProcessError as error:
+        if (
+            error.returncode == 75
+            and len(command) > 1
+            and Path(command[1]).name == "wrapper.py"
+        ):
+            print(
+                f"[!] Cota ou limite do provedor de IA atingido em {label}; "
+                "as demais vagas não serão enviadas nesta execução."
+            )
+            failures.append(f"{label} (cota de IA)")
+            return STAGE_QUOTA_EXHAUSTED
+        print(f"[!] Falha em {label}: {error}")
+        failures.append(label)
+        return False
+    except (OSError, subprocess.TimeoutExpired) as error:
         print(f"[!] Falha em {label}: {error}")
         failures.append(label)
         return False
@@ -69,14 +89,42 @@ def run_pipeline():
             continue
         file_path = INBOX_DIR / f"{short_id}.txt"
         if file_path.exists():
+            try:
+                job_text = file_path.read_text(encoding="utf-8")
+                wrapper.validate_job_url(job_text)
+            except ValueError as error:
+                store.defer_invalid_job_url(short_id, error, DB_PATH)
+                print(
+                    f"[!] Vaga {short_id} com URL inválida; avaliação por IA "
+                    f"cancelada e encaminhada para INPUT_REVIEW: {error}"
+                )
+                continue
+            try:
+                wrapper.extract_job_description(job_text)
+            except ValueError as error:
+                status = store.defer_missing_description(short_id, error, DB_PATH)
+                print(
+                    f"[!] Vaga {short_id} sem descrição útil; avaliação por IA "
+                    f"cancelada e status encaminhado para {status or 'revisão'}: "
+                    f"{error}"
+                )
+                continue
             print(f"\n[+] Avaliando vaga ID: {short_id}...")
-            succeeded = run_stage(
+            result = run_stage(
                 f"Avaliação da vaga {short_id}",
                 [VENV_PYTHON, str(WRAPPER_SCRIPT), str(file_path), "--defer-notifications"],
                 failures,
                 timeout=HERMES_TIMEOUT_SECONDS + 120,
             )
-            if not succeeded:
+            if result == STAGE_QUOTA_EXHAUSTED:
+                store.mark_evaluation_failed(
+                    short_id,
+                    "O provedor de IA sinalizou limite de uso (HTTP 429/quota).",
+                    DB_PATH,
+                    retry_after_seconds=AI_QUOTA_RETRY_SECONDS,
+                )
+                break
+            if not result:
                 store.mark_evaluation_failed(
                     short_id,
                     "O processo de avaliação falhou ou excedeu o timeout.",
@@ -85,9 +133,12 @@ def run_pipeline():
         else:
             print(f"[!] Arquivo de entrada não encontrado: {file_path}")
             failures.append(f"Arquivo ausente para a vaga {short_id}")
-            store.mark_evaluation_failed(
-                short_id, f"Arquivo de entrada ausente: {file_path}", DB_PATH
+            status = store.defer_missing_description(
+                short_id,
+                f"Arquivo de entrada ausente: {file_path}",
+                DB_PATH,
             )
+            print(f"[!] Vaga encaminhada para {status or 'revisão'} sem chamada à IA.")
 
     db = sqlite3.connect(DB_PATH)
     try:

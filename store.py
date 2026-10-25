@@ -128,6 +128,23 @@ def connect(path=DB_PATH):
             applied_at TEXT NOT NULL
         )"""
     )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS ai_usage (
+            id INTEGER PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_chars INTEGER NOT NULL,
+            input_tokens_estimate INTEGER NOT NULL,
+            response_chars INTEGER NOT NULL,
+            output_tokens_estimate INTEGER NOT NULL,
+            outcome TEXT NOT NULL,
+            error_type TEXT
+        )"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_usage_job_id ON ai_usage(job_id, id)"
+    )
     migration_id = "restore-evaluated-jobs-from-legacy-scrape-backfill-v1"
     if not db.execute(
         "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
@@ -614,7 +631,101 @@ def claim_evaluation(short_id, lease_seconds, path=DB_PATH):
         db.close()
 
 
-def mark_evaluation_failed(short_id, error, path=DB_PATH):
+def defer_missing_description(short_id, error, path=DB_PATH):
+    """Move a claimed job with no usable description out of AI evaluation."""
+    db = connect(path)
+    try:
+        row = db.execute(
+            "SELECT source, url FROM jobs WHERE id = ? AND status = 'EVALUATING'",
+            (short_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        _, url = row
+        parsed_url = urlsplit(url or "")
+        is_linkedin_job_url = (
+            parsed_url.hostname in ("linkedin.com", "www.linkedin.com")
+            and (
+                parsed_url.path.startswith("/jobs/view/")
+                or parsed_url.path.startswith("/comm/jobs/view/")
+            )
+        )
+        status = "SCRAPE_PENDING" if is_linkedin_job_url else "SCRAPE_REVIEW"
+        retry_at = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if is_linkedin_job_url
+            else None
+        )
+        with db:
+            db.execute(
+                """UPDATE jobs SET status = ?, scrape_next_attempt = ?,
+                   scrape_last_error = ?, evaluation_next_attempt = NULL,
+                   evaluation_lease_until = NULL
+                   WHERE id = ? AND status = 'EVALUATING'""",
+                (status, retry_at, str(error)[:500], short_id),
+            )
+        return status
+    finally:
+        db.close()
+
+
+def defer_invalid_job_url(short_id, error, path=DB_PATH):
+    """Move a claimed job with a malformed reference to manual input review."""
+    db = connect(path)
+    try:
+        with db:
+            cursor = db.execute(
+                """UPDATE jobs SET status = 'INPUT_REVIEW',
+                   evaluation_last_error = ?, evaluation_next_attempt = NULL,
+                   evaluation_lease_until = NULL
+                   WHERE id = ? AND status = 'EVALUATING'""",
+                (str(error)[:500], short_id),
+            )
+            return cursor.rowcount == 1
+    finally:
+        db.close()
+
+
+def record_ai_usage(
+    short_id,
+    model,
+    prompt_chars,
+    response_chars,
+    outcome,
+    error_type=None,
+    path=DB_PATH,
+):
+    """Record per-job size estimates without retaining job text or model output."""
+    input_tokens_estimate = (prompt_chars + 3) // 4
+    output_tokens_estimate = (response_chars + 3) // 4
+    db = connect(path)
+    try:
+        with db:
+            db.execute(
+                """INSERT INTO ai_usage
+                   (job_id, recorded_at, model, prompt_chars,
+                    input_tokens_estimate, response_chars,
+                    output_tokens_estimate, outcome, error_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    short_id,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    str(model)[:100],
+                    max(0, int(prompt_chars)),
+                    input_tokens_estimate,
+                    max(0, int(response_chars)),
+                    output_tokens_estimate,
+                    str(outcome)[:50],
+                    str(error_type)[:100] if error_type else None,
+                ),
+            )
+    finally:
+        db.close()
+
+
+def mark_evaluation_failed(
+    short_id, error, path=DB_PATH, retry_after_seconds=None
+):
     db = connect(path)
     try:
         row = db.execute(
@@ -624,7 +735,11 @@ def mark_evaluation_failed(short_id, error, path=DB_PATH):
         if row is None:
             return
         attempts = row[0] + 1
-        delay_seconds = min(86400, 300 * (2 ** min(attempts - 1, 8)))
+        delay_seconds = (
+            min(86400, 300 * (2 ** min(attempts - 1, 8)))
+            if retry_after_seconds is None
+            else max(0, int(retry_after_seconds))
+        )
         next_attempt = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + delay_seconds,
             timezone.utc,

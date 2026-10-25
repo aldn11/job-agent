@@ -12,7 +12,8 @@ ALLOWED_JOB_DOMAINS = (
 )
 
 
-def validate_allowed_url(url, allowed_domains=ALLOWED_JOB_DOMAINS):
+def validate_https_url(url):
+    """Validate an HTTPS job link without imposing a source-domain allowlist."""
     try:
         parts = urlsplit(url)
         hostname = (parts.hostname or "").rstrip(".").lower()
@@ -26,10 +27,23 @@ def validate_allowed_url(url, allowed_domains=ALLOWED_JOB_DOMAINS):
         or parts.username is not None
         or parts.password is not None
         or port not in (None, 443)
-        or not any(
-            hostname == domain or hostname.endswith("." + domain)
-            for domain in allowed_domains
-        )
+        or any(character.isspace() for character in url)
+    ):
+        raise ValueError("URL inválida: informe um endereço HTTPS válido.")
+    return url
+
+
+def validate_allowed_url(url, allowed_domains=ALLOWED_JOB_DOMAINS):
+    try:
+        parts = urlsplit(url)
+        hostname = (parts.hostname or "").rstrip(".").lower()
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("URL inválida.") from None
+
+    validate_https_url(url)
+    if not any(
+        hostname == domain or hostname.endswith("." + domain)
+        for domain in allowed_domains
     ):
         raise ValueError("URL fora da lista permitida.")
     return url

@@ -5,6 +5,23 @@ import url_policy
 
 
 class UrlPolicyTests(unittest.TestCase):
+    def test_generic_https_job_links_allow_external_sites_but_reject_bad_urls(self):
+        self.assertEqual(
+            url_policy.validate_https_url("https://careers.example.org/jobs/123"),
+            "https://careers.example.org/jobs/123",
+        )
+        for url in (
+            "http://careers.example.org/jobs/123",
+            "javascript:alert(1)",
+            "https://user:password@careers.example.org/jobs/123",
+            "https://careers.example.org:444/jobs/123",
+            "https:///jobs/123",
+            "https://careers.example.org/jobs/a b",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    url_policy.validate_https_url(url)
+
     def test_allows_only_https_urls_on_supported_domains(self):
         for url in (
             "https://linkedin.com/jobs/view/123",

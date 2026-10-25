@@ -2,7 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import store
@@ -53,6 +53,154 @@ class StoreRetryTests(unittest.TestCase):
             )
         db.close()
         self.assertEqual(store.pending_evaluation_jobs(self.db_path), [("retry123",)])
+
+    def test_quota_failure_uses_long_retry_delay(self):
+        self.assertTrue(store.claim_evaluation("retry123", 3600, self.db_path))
+        before = datetime.now(timezone.utc)
+        store.mark_evaluation_failed(
+            "retry123",
+            "provider quota",
+            self.db_path,
+            retry_after_seconds=86400,
+        )
+
+        db = store.connect(self.db_path)
+        retry_at, attempts = db.execute(
+            """SELECT evaluation_next_attempt, evaluation_attempts
+               FROM jobs WHERE id = ?""",
+            ("retry123",),
+        ).fetchone()
+        db.close()
+        retry_at = datetime.fromisoformat(retry_at)
+        self.assertGreaterEqual(
+            retry_at,
+            before + timedelta(hours=23, minutes=59),
+        )
+        self.assertEqual(attempts, 1)
+        self.assertEqual(store.pending_evaluation_jobs(self.db_path), [])
+
+    def test_missing_linkedin_description_returns_to_scrape_queue(self):
+        self.assertTrue(store.claim_evaluation("retry123", 3600, self.db_path))
+        status = store.defer_missing_description(
+            "retry123", "Description is too short.", self.db_path
+        )
+
+        db = store.connect(self.db_path)
+        stored_status, retry_at, lease = db.execute(
+            """SELECT status, scrape_next_attempt, evaluation_lease_until
+               FROM jobs WHERE id = ?""",
+            ("retry123",),
+        ).fetchone()
+        db.close()
+        self.assertEqual(status, "SCRAPE_PENDING")
+        self.assertEqual(stored_status, "SCRAPE_PENDING")
+        self.assertIsNotNone(retry_at)
+        self.assertIsNone(lease)
+        self.assertEqual(store.pending_evaluation_jobs(self.db_path), [])
+
+    def test_invalid_job_url_moves_claimed_job_to_input_review(self):
+        self.assertTrue(store.claim_evaluation("retry123", 3600, self.db_path))
+        self.assertTrue(
+            store.defer_invalid_job_url(
+                "retry123", "URL da vaga inválida.", self.db_path
+            )
+        )
+
+        db = store.connect(self.db_path)
+        status, error, retry_at, lease = db.execute(
+            """SELECT status, evaluation_last_error, evaluation_next_attempt,
+                      evaluation_lease_until
+               FROM jobs WHERE id = ?""",
+            ("retry123",),
+        ).fetchone()
+        db.close()
+        self.assertEqual(status, "INPUT_REVIEW")
+        self.assertEqual(error, "URL da vaga inválida.")
+        self.assertIsNone(retry_at)
+        self.assertIsNone(lease)
+        self.assertEqual(store.pending_evaluation_jobs(self.db_path), [])
+
+    def test_missing_non_linkedin_description_is_sent_to_manual_review(self):
+        db = store.connect(self.db_path)
+        with db:
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'EVALUATING')""",
+                (
+                    "rss:review",
+                    "review123",
+                    "remotive",
+                    "https://remotive.com/remote-jobs/123",
+                    "Company",
+                    "Role",
+                    "fp-review",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        db.close()
+
+        status = store.defer_missing_description(
+            "review123", "Description is too short.", self.db_path
+        )
+        self.assertEqual(status, "SCRAPE_REVIEW")
+        db = store.connect(self.db_path)
+        stored_status, retry_at = db.execute(
+            "SELECT status, scrape_next_attempt FROM jobs WHERE id = ?",
+            ("review123",),
+        ).fetchone()
+        db.close()
+        self.assertEqual(stored_status, "SCRAPE_REVIEW")
+        self.assertIsNone(retry_at)
+
+    def test_linkedin_source_without_listing_url_is_not_sent_to_scraper(self):
+        db = store.connect(self.db_path)
+        with db:
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen,
+                    status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'EVALUATING')""",
+                (
+                    "linkedin:manual",
+                    "manual123",
+                    "LinkedIn",
+                    "https://www.linkedin.com/",
+                    "Company",
+                    "Role",
+                    "fp-manual",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        db.close()
+
+        status = store.defer_missing_description(
+            "manual123", "Description is too short.", self.db_path
+        )
+        self.assertEqual(status, "SCRAPE_REVIEW")
+
+    def test_ai_usage_records_only_sizes_and_estimated_tokens(self):
+        store.record_ai_usage(
+            "retry123",
+            "test-model",
+            prompt_chars=101,
+            response_chars=21,
+            outcome="success",
+            path=self.db_path,
+        )
+
+        db = store.connect(self.db_path)
+        row = db.execute(
+            """SELECT job_id, model, prompt_chars, input_tokens_estimate,
+                      response_chars, output_tokens_estimate, outcome, error_type
+               FROM ai_usage"""
+        ).fetchone()
+        db.close()
+        self.assertEqual(
+            row,
+            ("retry123", "test-model", 101, 26, 21, 6, "success", None),
+        )
 
     def test_incomplete_evaluation_stays_queued_with_retry_metadata(self):
         store.claim_evaluation("retry123", 3600, self.db_path)
@@ -157,6 +305,9 @@ class StoreRetryTests(unittest.TestCase):
         review_columns = {
             row[1] for row in db.execute("PRAGMA table_info(email_review_queue)")
         }
+        usage_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(ai_usage)")
+        }
         status, = db.execute(
             "SELECT status FROM jobs WHERE id = ?", ("incomplete",)
         ).fetchone()
@@ -179,6 +330,14 @@ class StoreRetryTests(unittest.TestCase):
                 "sender", "subject", "sent_at", "reason", "recorded_at",
             }
             <= review_columns
+        )
+        self.assertTrue(
+            {
+                "job_id", "recorded_at", "model", "prompt_chars",
+                "input_tokens_estimate", "response_chars",
+                "output_tokens_estimate", "outcome", "error_type",
+            }
+            <= usage_columns
         )
         self.assertEqual(status, "SCRAPE_UNAVAILABLE")
         self.assertEqual(old_status, "SCRAPE_UNAVAILABLE")
