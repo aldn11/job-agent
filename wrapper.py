@@ -183,11 +183,24 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
             or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}
             or not isinstance(item["quote"], str)
             or not item["quote"].strip()
-            or item["quote"] not in job_text
         ):
             raise ValueError(
                 "Requisito obrigatório inválido ou citação ausente do texto da vaga."
             )
+        quote = item["quote"]
+        if quote not in job_text:
+            # Allow the model to join multiple spans with newline or semicolon,
+            # same tolerance applied to location_evidence. Validate each part.
+            parts = [p.strip() for p in re.split(r"[\n;]+", quote) if len(p.strip()) > 3]
+            missing = [p for p in parts if p not in job_text]
+            if missing:
+                excerpt = missing[0][:200] + ("..." if len(missing[0]) > 200 else "")
+                req_excerpt = item["requirement"][:100]
+                raise ValueError(
+                    f"Citação do requisito não encontrada literalmente na vaga. "
+                    f"Requisito: {req_excerpt!r}. "
+                    f"Trecho ausente: {excerpt!r}."
+                )
 
     nice_to_have = data["nice_to_have"]
     if not isinstance(nice_to_have, list):
