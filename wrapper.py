@@ -299,6 +299,8 @@ def run_vargas(job_file_path: Path) -> dict:
         "Não escreva descrições ou variações nos itens dessa lista. "
         "Para location_evidence, copie literalmente, preservando palavras e "
         "pontuação; se não houver trecho de suporte, use string vazia.\n"
+        "Não escreva nenhum arquivo. Não salve evaluation.json nem qualquer "
+        "outro arquivo. Imprima apenas o objeto JSON puro no stdout e nada mais.\n"
         "BEGIN\n"
         f"{prompt_job_text}\n"
         "END"

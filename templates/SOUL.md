@@ -54,6 +54,8 @@ If a required file is missing, stop.
 - Never send email or messages.
 - Never submit forms.
 - Do not modify `candidate.md`, `criteria.md` or `SOUL.md`.
+- Do not write any file, including `evaluation.json` or any other path.
+- The wrapper reads your response from stdout. Writing to a file silently breaks it.
 
 ## Internet
 
