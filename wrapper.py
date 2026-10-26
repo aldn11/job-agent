@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import json
+import math
 import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from dotenv import load_dotenv
 import location_policy
@@ -87,9 +89,13 @@ def _process_failure_details(error):
 def validate_evaluation_data(data: dict, job_text: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("A resposta de Vargas precisa ser um objeto JSON.")
-    # location_evidence is allowed to be absent – treat it as empty string so
-    # that a model which forgets the key doesn't discard an otherwise valid eval.
+
+    # ── 1. Defaults para campos opcionais que o modelo às vezes omite ────────
+    # location_evidence é semanticamente opcional (pode ser ""); não faz sentido
+    # rejeitar uma avaliação válida só porque a chave foi omitida.
     data.setdefault("location_evidence", "")
+
+    # ── 2. Schema: campos presentes / inesperados ─────────────────────────────
     missing = EVALUATION_FIELDS - data.keys()
     unexpected = data.keys() - EVALUATION_FIELDS
     if missing or unexpected:
@@ -100,13 +106,20 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
             details.append("campos inesperados: " + ", ".join(sorted(unexpected)))
         raise ValueError("JSON da avaliação inválido (" + "; ".join(details) + ").")
 
+    # ── 3. Campos de string: coerce None → "" e reporta qual campo falhou ─────
     string_fields = (
         "title", "company", "source", "url", "text_source", "info_status",
         "work_mode", "location_text", "role_match", "location_evidence",
         "seniority_level", "english_level_required", "pay_currency",
     )
-    if any(not isinstance(data[field], str) for field in string_fields):
-        raise ValueError("Campo textual com tipo inválido na avaliação.")
+    for field in string_fields:
+        if data[field] is None:
+            data[field] = ""
+        if not isinstance(data[field], str):
+            raise ValueError(
+                f"Campo '{field}' deveria ser texto mas recebeu "
+                f"{type(data[field]).__name__}: {data[field]!r}."
+            )
     if not data["title"].strip() or not data["company"].strip() or not data["source"].strip():
         raise ValueError("Título, empresa e fonte não podem estar vazios.")
     header = job_text.split("JOB TEXT:", 1)[0]
@@ -114,6 +127,7 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
     if source_url and data["url"] != source_url.group(1):
         raise ValueError("A URL da resposta não corresponde à vaga processada.")
 
+    # ── 4. Enums: mensagem inclui campo, valor recebido e valores aceitos ─────
     enums = {
         "text_source": {"pasted", "company_site", "search_snippet"},
         "info_status": {"COMPLETE", "INCOMPLETE"},
@@ -129,40 +143,68 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
         "pay_currency": {"USD", "OTHER", "NOT_STATED"},
     }
     for field, accepted in enums.items():
-        if data[field] not in accepted:
-            raise ValueError(f"Valor inválido para {field}.")
+        if not isinstance(data[field], str) or data[field] not in accepted:
+            raise ValueError(
+                f"Valor inválido para '{field}': recebido {data[field]!r}. "
+                f"Aceitos: {', '.join(sorted(accepted))}."
+            )
 
+    # ── 5. years_required: coerce string/float → int quando possível ─────────
     years = data["years_required"]
-    if years is not None and (
-        isinstance(years, bool) or not isinstance(years, int) or years < 0
-    ):
-        raise ValueError("years_required deve ser inteiro não negativo ou null.")
-    for field in ("spoken_english_emphasis", "prompt_injection_detected"):
-        if not isinstance(data[field], bool):
-            raise ValueError(f"{field} deve ser booleano.")
+    if years is not None:
+        if isinstance(years, str):
+            try:
+                years = int(years)
+                data["years_required"] = years
+            except ValueError:
+                pass
+        if isinstance(years, float) and math.isfinite(years) and years.is_integer():
+            years = int(years)
+            data["years_required"] = years
+        if isinstance(years, bool) or not isinstance(years, int) or years < 0:
+            raise ValueError("years_required deve ser inteiro não negativo ou null.")
 
+    # ── 6. Booleanos: coerce string "true"/"false" e int 0/1 → bool ──────────
+    for field in ("spoken_english_emphasis", "prompt_injection_detected"):
+        val = data[field]
+        if isinstance(val, bool):
+            pass  # already correct
+        elif isinstance(val, str) and val.lower() in ("true", "false"):
+            data[field] = val.lower() == "true"
+        elif val in (0, 1) and not isinstance(val, bool):
+            data[field] = bool(val)
+        else:
+            raise ValueError(
+                f"'{field}' deve ser booleano; recebido {val!r} ({type(val).__name__})."
+            )
+
+    # ── 7. Listas de strings: reporta índice e valor problemático ────────────
     def validate_string_list(field):
         value = data[field]
-        if not isinstance(value, list) or any(
-            not isinstance(item, str) for item in value
-        ):
-            raise ValueError(f"{field} deve ser uma lista de textos.")
+        if not isinstance(value, list):
+            raise ValueError(f"'{field}' deve ser uma lista; recebido {type(value).__name__}.")
+        for idx, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"'{field}[{idx}]' deve ser texto; recebido "
+                    f"{type(item).__name__}: {item!r}."
+                )
 
     for field in (
         "hard_reject_flags", "red_flags", "reasons_pt", "gaps_pt",
         "interview_risks_pt",
     ):
         validate_string_list(field)
+
+    # ── 8. hard_reject_flags: strip valores desconhecidos + log em red_flags ──
+    # Um flag inventado (ex: SALES_ROLE) não tem significado, mas se mantido
+    # enviaria a vaga para SKIP indevidamente.
     invalid_flags = [
         flag
         for flag in data["hard_reject_flags"]
         if flag not in ALLOWED_HARD_REJECT_FLAGS
     ]
     if invalid_flags:
-        # Strip unrecognised flags instead of discarding the whole evaluation.
-        # An invented flag (e.g. SALES_ROLE) has no semantic effect in the
-        # pipeline but, if kept, would silently send the job to SKIP.
-        # Log it in red_flags so it remains visible in the output.
         data["hard_reject_flags"] = [
             f for f in data["hard_reject_flags"] if f in ALLOWED_HARD_REJECT_FLAGS
         ]
@@ -170,59 +212,88 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
             f"[aviso] flag desconhecida ignorada: {f!r}" for f in invalid_flags
         ]
 
+    # ── 9. mandatory_requirements ─────────────────────────────────────────────
+    def _quote_in_text(q: str) -> bool:
+        """Match exact evidence while tolerating Unicode and whitespace variants."""
+        def normalized(value):
+            value = unicodedata.normalize("NFKC", value)
+            return " ".join(value.split())
+
+        source = normalized(job_text)
+        if normalized(q) in source:
+            return True
+        parts = [p.strip() for p in re.split(r"[\n;]+", q) if len(p.strip()) > 3]
+        return bool(parts) and all(normalized(p) in source for p in parts)
+
     mandatory = data["mandatory_requirements"]
     if not isinstance(mandatory, list):
-        raise ValueError("mandatory_requirements deve ser uma lista.")
-    for item in mandatory:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"requirement", "status", "quote"}
-            or not isinstance(item["requirement"], str)
-            or not item["requirement"].strip()
-            or not isinstance(item["status"], str)
-            or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}
-            or not isinstance(item["quote"], str)
-            or not item["quote"].strip()
-        ):
+        raise ValueError("'mandatory_requirements' deve ser uma lista.")
+    for idx, item in enumerate(mandatory):
+        if not isinstance(item, dict):
+            raise ValueError(f"mandatory_requirements[{idx}] deve ser um objeto.")
+        extra = set(item) - {"requirement", "status", "quote"}
+        missing_keys = {"requirement", "status", "quote"} - set(item)
+        if extra or missing_keys:
             raise ValueError(
-                "Requisito obrigatório inválido ou citação ausente do texto da vaga."
+                f"mandatory_requirements[{idx}] tem estrutura inválida "
+                f"(ausentes: {sorted(missing_keys)}, extras: {sorted(extra)})."
             )
-        quote = item["quote"]
-        if quote not in job_text:
-            # Allow the model to join multiple spans with newline or semicolon,
-            # same tolerance applied to location_evidence. Validate each part.
+        req = item.get("requirement", "")
+        status = item.get("status", "")
+        quote = item.get("quote", "")
+        if not isinstance(req, str) or not req.strip():
+            raise ValueError(f"mandatory_requirements[{idx}].requirement inválido.")
+        if not isinstance(status, str) or status not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}:
+            raise ValueError(
+                f"mandatory_requirements[{idx}].status inválido: {status!r}."
+            )
+        if not isinstance(quote, str):
+            raise ValueError(f"mandatory_requirements[{idx}].quote deve ser string.")
+        # Para status=UNKNOWN a IA às vezes não tem trecho — aceita vazio.
+        if status == "UNKNOWN" and not quote.strip():
+            continue
+        if not quote.strip():
+            raise ValueError(
+                f"mandatory_requirements[{idx}].quote vazio "
+                f"(requisito: {req[:80]!r})."
+            )
+        if not _quote_in_text(quote):
             parts = [p.strip() for p in re.split(r"[\n;]+", quote) if len(p.strip()) > 3]
-            missing = [p for p in parts if p not in job_text]
-            if missing:
-                excerpt = missing[0][:200] + ("..." if len(missing[0]) > 200 else "")
-                req_excerpt = item["requirement"][:100]
-                raise ValueError(
-                    f"Citação do requisito não encontrada literalmente na vaga. "
-                    f"Requisito: {req_excerpt!r}. "
-                    f"Trecho ausente: {excerpt!r}."
-                )
+            missing_part = next((p for p in parts if p not in job_text), quote)
+            excerpt = missing_part[:200] + ("..." if len(missing_part) > 200 else "")
+            raise ValueError(
+                f"Citação do requisito não encontrada literalmente na vaga. "
+                f"Requisito: {req[:100]!r}. "
+                f"Trecho ausente: {excerpt!r}."
+            )
 
+    # ── 10. nice_to_have ──────────────────────────────────────────────────────
     nice_to_have = data["nice_to_have"]
     if not isinstance(nice_to_have, list):
-        raise ValueError("nice_to_have deve ser uma lista.")
-    for item in nice_to_have:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"item", "status"}
-            or not isinstance(item["item"], str)
-            or not item["item"].strip()
-            or not isinstance(item["status"], str)
-            or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}
-        ):
-            raise ValueError("Item nice_to_have inválido.")
+        raise ValueError("'nice_to_have' deve ser uma lista.")
+    for idx, item in enumerate(nice_to_have):
+        if not isinstance(item, dict):
+            raise ValueError(f"nice_to_have[{idx}] deve ser um objeto.")
+        if set(item) != {"item", "status"}:
+            raise ValueError(
+                f"nice_to_have[{idx}] tem estrutura inválida: chaves={sorted(item)}."
+            )
+        if not isinstance(item["item"], str) or not item["item"].strip():
+            raise ValueError(f"nice_to_have[{idx}].item inválido.")
+        if not isinstance(item["status"], str) or item["status"] not in {"MET", "PARTIAL", "NOT_MET", "UNKNOWN"}:
+            raise ValueError(
+                f"nice_to_have[{idx}].status inválido: {item['status']!r}."
+            )
 
-    if data["location_evidence"] and data["location_evidence"] not in job_text:
+    # ── 11. location_evidence: verifica partes individuais se necessário ──────
+    if data["location_evidence"] and not _quote_in_text(data["location_evidence"]):
         evidence = data["location_evidence"]
-        # Allow the model to join multiple spans with newline or semicolon: validate
-        # each individual part so that two legitimate quotes separated by "\n" or ";"
-        # don't cause a false rejection.
         parts = [p.strip() for p in re.split(r"[\n;]+", evidence) if len(p.strip()) > 3]
-        missing_parts = [p for p in parts if p not in job_text]
+        normalized_job_text = " ".join(unicodedata.normalize("NFKC", job_text).split())
+        missing_parts = [
+            p for p in parts
+            if " ".join(unicodedata.normalize("NFKC", p).split()) not in normalized_job_text
+        ]
         if missing_parts:
             excerpt = missing_parts[0][:240] + ("..." if len(missing_parts[0]) > 240 else "")
             raise ValueError(
@@ -230,10 +301,11 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
                 f"Valor recebido: {excerpt!r}. Copie uma frase/trecho exato do texto "
                 "ou dos metadados da vaga, ou use string vazia se não houver evidência."
             )
+
     if data["info_status"] == "COMPLETE" and len(job_text.strip()) < 100:
         raise ValueError("A vaga é curta demais para uma avaliação completa.")
-    return data
 
+    return data
 
 def extract_job_description(job_text: str) -> str:
     marker = "JOB TEXT:"
@@ -352,6 +424,10 @@ def run_vargas(job_file_path: Path) -> dict:
             "timeout",
             "timeout",
             DB_PATH,
+            error_detail=(
+                f"Hermes timeout após {HERMES_TIMEOUT_SECONDS}s; stderr: "
+                f"{_diagnostic_output(error.stderr)}"
+            ),
         )
         diagnostics = (
             f"\nstderr parcial:\n{_diagnostic_output(error.stderr)}"
@@ -373,6 +449,10 @@ def run_vargas(job_file_path: Path) -> dict:
                 "quota_exhausted",
                 "provider_quota",
                 DB_PATH,
+                error_detail=(
+                    f"exit={error.returncode}; stderr: "
+                    f"{_diagnostic_output(error.stderr)}"
+                ),
             )
             raise ProviderQuotaExceeded(
                 "O provedor de IA sinalizou limite de uso (HTTP 429/quota)."
@@ -385,6 +465,10 @@ def run_vargas(job_file_path: Path) -> dict:
             "provider_error",
             "process_error",
             DB_PATH,
+            error_detail=(
+                f"exit={error.returncode}; stderr: "
+                f"{_diagnostic_output(error.stderr)}"
+            ),
         )
         raise RuntimeError(_process_failure_details(error)) from error
 
@@ -408,6 +492,7 @@ def run_vargas(job_file_path: Path) -> dict:
                 "quota_exhausted",
                 "provider_quota",
                 DB_PATH,
+                error_detail="Provider quota/rate limit reported in response or stderr.",
             )
             raise ProviderQuotaExceeded(
                 "O provedor de IA sinalizou limite de uso (HTTP 429/quota)."
@@ -420,6 +505,10 @@ def run_vargas(job_file_path: Path) -> dict:
             "invalid_response",
             "invalid_json",
             DB_PATH,
+            error_detail=(
+                f"{type(error).__name__}: {error}; "
+                f"stderr: {_diagnostic_output(res.stderr)}"
+            ),
         )
         if isinstance(error, json.JSONDecodeError):
             parse_location = (
@@ -435,8 +524,10 @@ def run_vargas(job_file_path: Path) -> dict:
             f"stdout:\n{_diagnostic_output(res.stdout)}"
         ) from error
     try:
-        evaluation = validate_evaluation_data(parsed, job_text)
-    except ValueError:
+        # Validate evidence only against the text Hermes actually received. This
+        # prevents accepting citations from the portion removed by truncation.
+        evaluation = validate_evaluation_data(parsed, prompt_job_text)
+    except ValueError as error:
         store.record_ai_usage(
             short_id,
             AI_MODEL_NAME,
@@ -445,6 +536,10 @@ def run_vargas(job_file_path: Path) -> dict:
             "invalid_response",
             "schema_validation",
             DB_PATH,
+            error_detail=(
+                f"{type(error).__name__}: "
+                f"{str(error).split('Trecho ausente:', 1)[0].split('Valor recebido:', 1)[0].split('Requisito:', 1)[0][:500]}"
+            ),
         )
         raise
     store.record_ai_usage(
@@ -454,6 +549,28 @@ def run_vargas(job_file_path: Path) -> dict:
         len(res.stdout),
         "success",
         path=DB_PATH,
+        result_summary=json.dumps(
+            {
+                "info_status": evaluation["info_status"],
+                "work_mode": evaluation["work_mode"],
+                "role_match": evaluation["role_match"],
+                "seniority_level": evaluation["seniority_level"],
+                "years_required": evaluation["years_required"],
+                "mandatory_requirements": len(evaluation["mandatory_requirements"]),
+                "mandatory_status_counts": {
+                    status: sum(
+                        item["status"] == status
+                        for item in evaluation["mandatory_requirements"]
+                    )
+                    for status in ("MET", "PARTIAL", "NOT_MET", "UNKNOWN")
+                },
+                "nice_to_have": len(evaluation["nice_to_have"]),
+                "hard_reject_flags": evaluation["hard_reject_flags"],
+                "prompt_injection_detected": evaluation["prompt_injection_detected"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
     return evaluation
 

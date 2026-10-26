@@ -139,9 +139,17 @@ def connect(path=DB_PATH):
             response_chars INTEGER NOT NULL,
             output_tokens_estimate INTEGER NOT NULL,
             outcome TEXT NOT NULL,
-            error_type TEXT
+            error_type TEXT,
+            result_summary TEXT,
+            error_detail TEXT
         )"""
     )
+    ai_usage_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(ai_usage)").fetchall()
+    }
+    for column in ("result_summary", "error_detail"):
+        if column not in ai_usage_columns:
+            db.execute(f"ALTER TABLE ai_usage ADD COLUMN {column} TEXT")
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_usage_job_id ON ai_usage(job_id, id)"
     )
@@ -694,8 +702,10 @@ def record_ai_usage(
     outcome,
     error_type=None,
     path=DB_PATH,
+    result_summary=None,
+    error_detail=None,
 ):
-    """Record per-job size estimates without retaining job text or model output."""
+    """Record usage, a compact result summary, and bounded failure diagnostics."""
     input_tokens_estimate = (prompt_chars + 3) // 4
     output_tokens_estimate = (response_chars + 3) // 4
     db = connect(path)
@@ -705,8 +715,9 @@ def record_ai_usage(
                 """INSERT INTO ai_usage
                    (job_id, recorded_at, model, prompt_chars,
                     input_tokens_estimate, response_chars,
-                    output_tokens_estimate, outcome, error_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    output_tokens_estimate, outcome, error_type,
+                    result_summary, error_detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     short_id,
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -717,6 +728,8 @@ def record_ai_usage(
                     output_tokens_estimate,
                     str(outcome)[:50],
                     str(error_type)[:100] if error_type else None,
+                    str(result_summary)[:2000] if result_summary else None,
+                    str(error_detail)[:2000] if error_detail else None,
                 ),
             )
     finally:
