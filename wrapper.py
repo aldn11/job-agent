@@ -159,11 +159,16 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
         if flag not in ALLOWED_HARD_REJECT_FLAGS
     ]
     if invalid_flags:
-        raise ValueError(
-            "hard_reject_flags contém valor(es) não reconhecido(s): "
-            f"{invalid_flags[:5]!r}. Valores aceitos: "
-            f"{', '.join(sorted(ALLOWED_HARD_REJECT_FLAGS))}."
-        )
+        # Strip unrecognised flags instead of discarding the whole evaluation.
+        # An invented flag (e.g. SALES_ROLE) has no semantic effect in the
+        # pipeline but, if kept, would silently send the job to SKIP.
+        # Log it in red_flags so it remains visible in the output.
+        data["hard_reject_flags"] = [
+            f for f in data["hard_reject_flags"] if f in ALLOWED_HARD_REJECT_FLAGS
+        ]
+        data["red_flags"] = list(data.get("red_flags", [])) + [
+            f"[aviso] flag desconhecida ignorada: {f!r}" for f in invalid_flags
+        ]
 
     mandatory = data["mandatory_requirements"]
     if not isinstance(mandatory, list):
