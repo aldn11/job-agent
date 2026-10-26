@@ -87,6 +87,9 @@ def _process_failure_details(error):
 def validate_evaluation_data(data: dict, job_text: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("A resposta de Vargas precisa ser um objeto JSON.")
+    # location_evidence is allowed to be absent – treat it as empty string so
+    # that a model which forgets the key doesn't discard an otherwise valid eval.
+    data.setdefault("location_evidence", "")
     missing = EVALUATION_FIELDS - data.keys()
     unexpected = data.keys() - EVALUATION_FIELDS
     if missing or unexpected:
