@@ -3,7 +3,11 @@
 O pipeline grava uma linha em `ai_usage` para cada tentativa iniciada pelo
 Hermes. O registro inclui o ID interno da vaga, data, rótulo do modelo, tamanho
 do prompt e da resposta, estimativas de tokens, resultado e tipo de erro.
-O texto da vaga e a resposta do modelo **não** são gravados nessa tabela.
+Nas execuções bem-sucedidas, `result_summary` guarda apenas campos categóricos
+da avaliação e contagens de requisitos. Em falhas, `error_detail` guarda a
+causa técnica resumida, como código de saída, erro de parsing, falha de schema
+ou diagnóstico de stderr. O stdout e o texto integral da vaga não são gravados
+nesses campos; os detalhes têm limite de 2.000 caracteres.
 
 ## Limites e interpretação
 
@@ -45,7 +49,8 @@ Para conferir as avaliações mais recentes:
 
 ```sql
 SELECT recorded_at, job_id, model, prompt_chars, input_tokens_estimate,
-       response_chars, output_tokens_estimate, outcome, error_type
+       response_chars, output_tokens_estimate, outcome, error_type,
+       result_summary, error_detail
 FROM ai_usage
 ORDER BY id DESC
 LIMIT 50;
