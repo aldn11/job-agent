@@ -197,12 +197,18 @@ def validate_evaluation_data(data: dict, job_text: str) -> dict:
 
     if data["location_evidence"] and data["location_evidence"] not in job_text:
         evidence = data["location_evidence"]
-        excerpt = evidence[:240] + ("..." if len(evidence) > 240 else "")
-        raise ValueError(
-            "location_evidence não corresponde literalmente à vaga. "
-            f"Valor recebido: {excerpt!r}. Copie uma frase/trecho exato do texto "
-            "ou dos metadados da vaga, ou use string vazia se não houver evidência."
-        )
+        # Allow the model to join multiple spans with newline or semicolon: validate
+        # each individual part so that two legitimate quotes separated by "\n" or ";"
+        # don't cause a false rejection.
+        parts = [p.strip() for p in re.split(r"[\n;]+", evidence) if len(p.strip()) > 3]
+        missing_parts = [p for p in parts if p not in job_text]
+        if missing_parts:
+            excerpt = missing_parts[0][:240] + ("..." if len(missing_parts[0]) > 240 else "")
+            raise ValueError(
+                "location_evidence não corresponde literalmente à vaga. "
+                f"Valor recebido: {excerpt!r}. Copie uma frase/trecho exato do texto "
+                "ou dos metadados da vaga, ou use string vazia se não houver evidência."
+            )
     if data["info_status"] == "COMPLETE" and len(job_text.strip()) < 100:
         raise ValueError("A vaga é curta demais para uma avaliação completa.")
     return data
