@@ -65,21 +65,27 @@ class EvaluationValidationTests(unittest.TestCase):
 
     def test_rejects_invalid_types_and_quotes_not_found_in_job(self):
         invalid = dict(self.evaluation, spoken_english_emphasis="false")
+        result = validate_evaluation_data(invalid, self.job_text)
+        self.assertIs(result["spoken_english_emphasis"], False)
+
+        invalid = dict(self.evaluation, spoken_english_emphasis=[False])
         with self.assertRaisesRegex(ValueError, "booleano"):
             validate_evaluation_data(invalid, self.job_text)
 
         invalid = copy.deepcopy(self.evaluation)
         invalid["mandatory_requirements"][0]["quote"] = "invented quote"
-        with self.assertRaisesRegex(ValueError, "citação ausente"):
+        with self.assertRaisesRegex(ValueError, "Trecho ausente.*invented quote"):
             validate_evaluation_data(invalid, self.job_text)
 
-    def test_hard_reject_validation_reports_unknown_flag_and_allowed_codes(self):
+    def test_unknown_hard_reject_flag_is_ignored_and_reported(self):
         invalid = copy.deepcopy(self.evaluation)
-        invalid["hard_reject_flags"] = ["LANGUAGE_REQUIREMENT"]
-        with self.assertRaisesRegex(
-            ValueError, "LANGUAGE_REQUIREMENT.*LANGUAGE_REQUIRED"
-        ):
-            validate_evaluation_data(invalid, self.job_text)
+        invalid["hard_reject_flags"] = ["LANGUAGE_REQUIRED", "LANGUAGE_REQUIREMENT"]
+        result = validate_evaluation_data(invalid, self.job_text)
+        self.assertEqual(result["hard_reject_flags"], ["LANGUAGE_REQUIRED"])
+        self.assertIn(
+            "[aviso] flag desconhecida ignorada: 'LANGUAGE_REQUIREMENT'",
+            result["red_flags"],
+        )
 
     def test_location_validation_reports_nonliteral_evidence(self):
         invalid = dict(self.evaluation, location_evidence="Remote in Brazil")
