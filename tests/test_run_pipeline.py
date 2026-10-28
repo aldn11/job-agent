@@ -40,6 +40,101 @@ class RunPipelineStageTests(unittest.TestCase):
         self.assertEqual(result, run_pipeline.STAGE_QUOTA_EXHAUSTED)
         self.assertEqual(failures, ["Job evaluation (cota de IA)"])
 
+    def test_session_coordination_exit_is_a_distinct_stage_result(self):
+        failures = []
+        with patch.object(
+            run_pipeline.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                76, ["python", "wrapper.py", "job.txt"]
+            ),
+        ):
+            result = run_pipeline.run_stage(
+                "Job evaluation", ["python", "wrapper.py", "job.txt"], failures
+            )
+
+        self.assertEqual(result, run_pipeline.STAGE_HERMES_SESSION_UNAVAILABLE)
+        self.assertEqual(failures, ["Job evaluation (coordenação de sessão Hermes)"])
+
+    def test_wrapper_exit_130_is_classified_as_an_interruption(self):
+        failures = []
+        with patch.object(
+            run_pipeline.subprocess,
+            "run",
+            side_effect=subprocess.CalledProcessError(
+                130, ["python", "wrapper.py", "job.txt"]
+            ),
+        ):
+            result = run_pipeline.run_stage(
+                "Job evaluation", ["python", "wrapper.py", "job.txt"], failures
+            )
+
+        self.assertEqual(result, run_pipeline.STAGE_INTERRUPTED)
+        self.assertEqual(failures, [])
+
+    def test_pipeline_releases_evaluation_lease_on_keyboard_interrupt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            job_id = "interruptedjob"
+            (inbox / f"{job_id}.txt").write_text(
+                "JOB TEXT:\n" + "Support users and resolve technical issues. " * 5,
+                encoding="utf-8",
+            )
+
+            db_path = root / "jobs.db"
+            db = store.connect(db_path)
+            db.execute(
+                """INSERT INTO jobs
+                   (key, id, source, url, company, title, fingerprint, first_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"test:{job_id}", job_id, "test", "https://example.com",
+                    "Company", "Role", job_id, "2026-01-01",
+                ),
+            )
+            db.commit()
+            db.close()
+
+            wrapper_calls = []
+
+            def run_command(command, check, timeout=None):
+                if str(command[1]).endswith("wrapper.py"):
+                    wrapper_calls.append(command)
+                    raise KeyboardInterrupt
+
+            with (
+                patch.object(run_pipeline, "BASE_DIR", root),
+                patch.object(run_pipeline, "INBOX_DIR", inbox),
+                patch.object(run_pipeline, "WRAPPER_SCRIPT", root / "wrapper.py"),
+                patch.object(run_pipeline, "DB_PATH", db_path),
+                patch.object(run_pipeline, "VENV_PYTHON", "python"),
+                patch.object(run_pipeline.subprocess, "run", side_effect=run_command),
+                patch(
+                    "telegram_notify.deliver_pending_notifications"
+                ) as deliver_notifications,
+            ):
+                result = run_pipeline.run_pipeline()
+
+            db = store.connect(db_path)
+            status, attempts, next_attempt, lease, last_error = db.execute(
+                """SELECT status, evaluation_attempts, evaluation_next_attempt,
+                          evaluation_lease_until, evaluation_last_error
+                   FROM jobs WHERE id = ?""",
+                (job_id,),
+            ).fetchone()
+            db.close()
+
+        self.assertEqual(result, 130)
+        self.assertEqual(len(wrapper_calls), 1)
+        self.assertEqual(status, "NEW")
+        self.assertEqual(attempts, 1)
+        self.assertIsNotNone(next_attempt)
+        self.assertIsNone(lease)
+        self.assertIn("Ctrl+C", last_error)
+        deliver_notifications.assert_not_called()
+
     def test_pipeline_returns_failure_when_job_evaluation_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -278,6 +373,70 @@ class RunPipelineStageTests(unittest.TestCase):
         self.assertIsNotNone(retry_at)
         self.assertEqual(attempts, 1)
         self.assertIn(("secondjob",), pending)
+
+    def test_pipeline_stops_after_session_coordination_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            db_path = root / "jobs.db"
+            db = store.connect(db_path)
+            for job_id in ("firstjob", "secondjob"):
+                (inbox / f"{job_id}.txt").write_text(
+                    "JOB TEXT:\n" + "Support users and resolve technical issues. " * 5,
+                    encoding="utf-8",
+                )
+                db.execute(
+                    """INSERT INTO jobs
+                       (key, id, source, url, company, title, fingerprint, first_seen)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"test:{job_id}", job_id, "test", "https://example.com",
+                        "Company", "Role", job_id, "2026-01-01",
+                    ),
+                )
+            db.commit()
+            db.close()
+
+            wrapper_calls = []
+
+            def run_command(command, check, timeout=None):
+                if str(command[1]).endswith("wrapper.py"):
+                    wrapper_calls.append(command)
+                    raise subprocess.CalledProcessError(76, command)
+
+            with (
+                patch.object(run_pipeline, "BASE_DIR", root),
+                patch.object(run_pipeline, "INBOX_DIR", inbox),
+                patch.object(run_pipeline, "WRAPPER_SCRIPT", root / "wrapper.py"),
+                patch.object(run_pipeline, "DB_PATH", db_path),
+                patch.object(run_pipeline, "VENV_PYTHON", "python"),
+                patch.object(run_pipeline.subprocess, "run", side_effect=run_command),
+                patch(
+                    "telegram_notify.deliver_pending_notifications",
+                    return_value=0,
+                ) as deliver_notifications,
+            ):
+                result = run_pipeline.run_pipeline()
+
+            db = store.connect(db_path)
+            state_rows = db.execute(
+                "SELECT id, status, evaluation_attempts, evaluation_lease_until "
+                "FROM jobs ORDER BY id"
+            ).fetchall()
+            states = {row[0]: row[1:] for row in state_rows}
+            db.close()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(len(wrapper_calls), 1)
+        self.assertEqual(
+            states,
+            {
+                "firstjob": ("NEW", 1, None),
+                "secondjob": ("NEW", 0, None),
+            },
+        )
+        deliver_notifications.assert_called_once_with(db_path)
 
     def test_pipeline_does_not_report_success_while_evaluations_are_pending(self):
         with tempfile.TemporaryDirectory() as temp_dir:

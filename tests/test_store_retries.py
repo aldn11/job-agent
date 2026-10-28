@@ -336,6 +336,7 @@ class StoreRetryTests(unittest.TestCase):
                 "job_id", "recorded_at", "model", "prompt_chars",
                 "input_tokens_estimate", "response_chars",
                 "output_tokens_estimate", "outcome", "error_type",
+                "result_summary", "error_detail",
             }
             <= usage_columns
         )

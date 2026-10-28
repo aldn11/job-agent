@@ -114,6 +114,7 @@ class EvaluationValidationTests(unittest.TestCase):
 
     def test_rejects_excessively_nested_json_from_vargas(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
             job_file = Path(temp_dir) / "job.txt"
             job_file.write_text(self.job_text, encoding="utf-8")
             result = subprocess.CompletedProcess(
@@ -122,7 +123,10 @@ class EvaluationValidationTests(unittest.TestCase):
                 stdout="[" * 2000 + "]" * 2000,
                 stderr="",
             )
-            with patch.object(wrapper.subprocess, "run", return_value=result):
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", return_value=result),
+            ):
                 with self.assertRaisesRegex(ValueError, "objeto JSON"):
                     wrapper.run_vargas(job_file)
 
@@ -242,7 +246,10 @@ class EvaluationValidationTests(unittest.TestCase):
                 stdout=stdout,
                 stderr="warning: response was empty",
             )
-            with patch.object(wrapper.subprocess, "run", return_value=result):
+            with (
+                patch.object(wrapper, "DB_PATH", Path(temp_dir) / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", return_value=result),
+            ):
                 with self.assertRaises(ValueError) as raised:
                     wrapper.run_vargas(job_file)
 
@@ -254,9 +261,70 @@ class EvaluationValidationTests(unittest.TestCase):
         self.assertIn(terminal_error, message)
         self.assertIn("warning: response was empty", message)
 
+    def test_invalid_json_diagnostic_is_persisted_without_storing_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_file = root / "job.json-test.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            result = subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout='not json: "private response content"',
+                stderr="provider emitted malformed JSON",
+            )
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", return_value=result),
+                self.assertRaises(ValueError),
+            ):
+                wrapper.run_vargas(job_file)
+
+            db = store.connect(root / "jobs.db")
+            outcome, error_type, error_detail = db.execute(
+                "SELECT outcome, error_type, error_detail FROM ai_usage"
+            ).fetchone()
+            db.close()
+
+        self.assertEqual((outcome, error_type), ("invalid_response", "invalid_json"))
+        self.assertIn("JSONDecodeError", error_detail)
+        self.assertIn("provider emitted malformed JSON", error_detail)
+        self.assertNotIn("private response content", error_detail)
+
+    def test_schema_validation_diagnostic_is_persisted_with_field_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_file = root / "job-schema-test.txt"
+            job_file.write_text(self.job_text, encoding="utf-8")
+            response_data = copy.deepcopy(self.evaluation)
+            del response_data["work_mode"]
+            result = subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout=json.dumps(response_data),
+                stderr="",
+            )
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", return_value=result),
+                self.assertRaisesRegex(ValueError, "work_mode"),
+            ):
+                wrapper.run_vargas(job_file)
+
+            db = store.connect(root / "jobs.db")
+            outcome, error_type, error_detail = db.execute(
+                "SELECT outcome, error_type, error_detail FROM ai_usage"
+            ).fetchone()
+            db.close()
+
+        self.assertEqual(
+            (outcome, error_type), ("invalid_response", "schema_validation")
+        )
+        self.assertIn("campos ausentes: work_mode", error_detail)
+
     def test_hermes_nonzero_exit_includes_bounded_stdout_and_stderr(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            job_file = Path(temp_dir) / "job.txt"
+            root = Path(temp_dir)
+            job_file = root / "job.txt"
             job_file.write_text(self.job_text, encoding="utf-8")
             error = subprocess.CalledProcessError(
                 1,
@@ -264,7 +332,10 @@ class EvaluationValidationTests(unittest.TestCase):
                 output="Hermes startup output",
                 stderr="profile was not found",
             )
-            with patch.object(wrapper.subprocess, "run", side_effect=error):
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", side_effect=error),
+            ):
                 with self.assertRaises(RuntimeError) as raised:
                     wrapper.run_vargas(job_file)
 
@@ -275,12 +346,16 @@ class EvaluationValidationTests(unittest.TestCase):
 
     def test_hermes_timeout_includes_partial_process_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            job_file = Path(temp_dir) / "job.txt"
+            root = Path(temp_dir)
+            job_file = root / "job.txt"
             job_file.write_text(self.job_text, encoding="utf-8")
             error = subprocess.TimeoutExpired(
                 ["docker", "exec"], 10, output=b"partial stdout", stderr=b"partial stderr"
             )
-            with patch.object(wrapper.subprocess, "run", side_effect=error):
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", side_effect=error),
+            ):
                 with self.assertRaises(RuntimeError) as raised:
                     wrapper.run_vargas(job_file)
         self.assertIn("partial stderr", str(raised.exception))
@@ -301,7 +376,8 @@ class EvaluationValidationTests(unittest.TestCase):
 
     def test_nonzero_hermes_exit_is_failure_even_when_stdout_is_valid_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            job_file = Path(temp_dir) / "job.txt"
+            root = Path(temp_dir)
+            job_file = root / "job.txt"
             job_file.write_text(self.job_text, encoding="utf-8")
             error = subprocess.CalledProcessError(
                 1,
@@ -309,7 +385,10 @@ class EvaluationValidationTests(unittest.TestCase):
                 output='{"result":"looks valid"}',
                 stderr="process failed after producing output",
             )
-            with patch.object(wrapper.subprocess, "run", side_effect=error):
+            with (
+                patch.object(wrapper, "DB_PATH", root / "jobs.db"),
+                patch.object(wrapper.subprocess, "run", side_effect=error),
+            ):
                 with self.assertRaises(RuntimeError) as raised:
                     wrapper.run_vargas(job_file)
         self.assertIn("código de saída 1", str(raised.exception))

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Compile project Python files and run the complete standard-library test suite."""
+import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +26,43 @@ COMPONENT_TESTS = {
     "url_policy.py": "test_url_policy.py",
     "wrapper.py": "test_wrapper_validation.py",
 }
+SCRIPT_TESTS = {
+    "scripts/validate.py": "test_validate_script.py",
+}
+
+
+def check_hermes_runtime(container_name="hermes", profile_name="vargas"):
+    """Ask Hermes' own strict registry reader to validate its runtime file."""
+    registry_path = f"/opt/data/profiles/{profile_name}/runtime/active_sessions.json"
+    check_code = (
+        "import sys; from pathlib import Path; "
+        "from hermes_cli.active_sessions import _read_entries; "
+        "entries = _read_entries(Path(sys.argv[1]), strict=True); "
+        "print(f'active_sessions.json válido; leases={len(entries)}')"
+    )
+    command = [
+        "docker", "exec", "-u", "hermes", container_name,
+        "python", "-c", check_code, registry_path,
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"[FALHA] Não foi possível validar o runtime Hermes: {error}", file=sys.stderr)
+        return False
+
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "sem diagnóstico").strip()
+        print(
+            "[FALHA] Registro de sessões Hermes inválido ou inacessível: "
+            + detail[-1500:],
+            file=sys.stderr,
+        )
+        return False
+
+    print("[OK] " + (result.stdout or "Registro de sessões Hermes válido.").strip())
+    return True
 
 
 def source_files():
@@ -35,7 +74,25 @@ def source_files():
     return sorted(files)
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check-hermes-runtime",
+        action="store_true",
+        help="valida o active_sessions.json no container Hermes usando o leitor estrito do próprio Hermes",
+    )
+    parser.add_argument(
+        "--hermes-container",
+        default=os.getenv("HERMES_CONTAINER_NAME", "hermes"),
+        help="nome do container Hermes (padrão: HERMES_CONTAINER_NAME ou hermes)",
+    )
+    parser.add_argument(
+        "--hermes-profile",
+        default=os.getenv("HERMES_PROFILE", "vargas"),
+        help="perfil Hermes cujo registro será validado (padrão: HERMES_PROFILE ou vargas)",
+    )
+    args = parser.parse_args(argv)
+
     files = source_files()
     try:
         for path in files:
@@ -68,6 +125,19 @@ def main():
         )
         return 1
 
+    missing_script_tests = [
+        test_file
+        for test_file in SCRIPT_TESTS.values()
+        if not (ROOT / "tests" / test_file).is_file()
+    ]
+    if missing_script_tests:
+        print(
+            "[FALHA] Scripts sem teste associado: "
+            + ", ".join(missing_script_tests),
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         "[OK] Todos os "
         f"{len(COMPONENT_TESTS)} componentes do projeto têm teste associado."
@@ -90,6 +160,10 @@ def main():
         return result.returncode
 
     print("[OK] Suíte de testes concluída.")
+    if args.check_hermes_runtime and not check_hermes_runtime(
+        args.hermes_container, args.hermes_profile
+    ):
+        return 1
     return 0
 
 

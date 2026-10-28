@@ -141,7 +141,7 @@ job-agent/
 │   └── uso-economia-tokens.md # AI usage estimates, queries and filter guidance
 ├── requirements.txt      # Locked Python dependencies
 ├── scripts/
-│   └── validate.py       # Syntax check and complete offline test suite
+│   └── validate.py       # Syntax/tests and optional Hermes runtime registry check
 ├── add_linkedin.py       # Terminal interactive CLI for manual job ingestion
 ├── add_remot.py          # Manual description ingestion for saved Remōt alerts
 ├── collector.py          # RSS feed collector script
@@ -272,6 +272,16 @@ python3 -m venv .venv
 ./.venv/bin/python scripts/validate.py
 ```
 
+Para também validar o registro de sessões no container Hermes em execução, passe
+`--check-hermes-runtime`. O script usa o leitor estrito do próprio Hermes e falha
+se o container, o perfil ou `active_sessions.json` estiver indisponível/inválido.
+Use `HERMES_CONTAINER_NAME` e `HERMES_PROFILE` ou os argumentos
+`--hermes-container` e `--hermes-profile` para selecionar o destino:
+
+```bash
+./.venv/bin/python scripts/validate.py --check-hermes-runtime
+```
+
 O script verifica a sintaxe de todos os arquivos Python do projeto, confirma
 que cada módulo Python principal tem arquivo de teste associado e executa
 toda a suíte em `tests/`. Os testes cobrem RSS, cadastro manual, leitura de
@@ -281,6 +291,11 @@ Chamadas de Docker/Hermes, IMAP, HTTP e Telegram são simuladas; a validação n
 usa credenciais nem acessa esses serviços. Ela detecta regressões cobertas
 pelos testes, mas não garante funcionamento perfeito em produção nem substitui
 um teste operacional controlado com o ambiente do usuário.
+
+Se `Ctrl+C` interromper uma avaliação, o pipeline registra a tentativa como
+falha temporária, libera a lease da vaga e encerra sem iniciar outras etapas.
+Diagnósticos limitados de JSON inválido e falhas de esquema ficam em
+`ai_usage.error_detail`; o conteúdo integral da resposta do modelo não é salvo.
 
 ### 5. Automated Daily Execution (`cron`)
 

@@ -49,6 +49,10 @@ class ProviderQuotaExceeded(RuntimeError):
     """The configured model provider rejected the request due to quota/rate limits."""
 
 
+class HermesSessionCoordinationUnavailable(RuntimeError):
+    """Hermes cannot safely confirm ownership of its active-session registry."""
+
+
 def _diagnostic_output(value):
     if value is None:
         return "(vazio)"
@@ -440,6 +444,27 @@ def run_vargas(job_file_path: Path) -> dict:
     except subprocess.CalledProcessError as error:
         output = error.stdout or error.output or ""
         error_text = f"{output}\n{error.stderr or ''}"
+        if "SESSION_COORDINATION_UNAVAILABLE" in error_text:
+            store.record_ai_usage(
+                short_id,
+                AI_MODEL_NAME,
+                len(prompt),
+                len(output),
+                "runtime_unavailable",
+                "session_coordination",
+                DB_PATH,
+                error_detail=(
+                    f"exit={error.returncode}; stderr: "
+                    f"{_diagnostic_output(error.stderr)}"
+                ),
+            )
+            raise HermesSessionCoordinationUnavailable(
+                "Hermes não conseguiu ler o registro de sessões ativas. "
+                "Verifique existência, permissões e conteúdo de "
+                "/opt/data/profiles/vargas/runtime/active_sessions.json "
+                "no container antes de executar a pipeline novamente. "
+                "Não remova o arquivo enquanto houver uma sessão Hermes ativa."
+            ) from error
         if _is_provider_quota_error(error_text):
             store.record_ai_usage(
                 short_id,
@@ -685,6 +710,12 @@ if __name__ == "__main__":
 
     try:
         data = run_vargas(file_path)
+    except KeyboardInterrupt:
+        print(
+            "[!] Avaliação interrompida pelo operador (Ctrl+C).",
+            file=sys.stderr,
+        )
+        sys.exit(130)
     except ProviderQuotaExceeded as error:
         store.mark_evaluation_failed(
             file_path.stem,
@@ -697,6 +728,9 @@ if __name__ == "__main__":
             f"{AI_QUOTA_RETRY_SECONDS} segundo(s)."
         )
         sys.exit(75)
+    except HermesSessionCoordinationUnavailable as error:
+        print(f"[!] {error}")
+        sys.exit(76)
     job_text = file_path.read_text(encoding="utf-8")
     final_result = calculate_score_and_verdict(data, job_text)
 

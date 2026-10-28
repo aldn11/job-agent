@@ -18,6 +18,8 @@ DB_PATH = BASE_DIR / "jobs.db"
 HERMES_TIMEOUT_SECONDS = int(os.getenv("HERMES_TIMEOUT_SECONDS", "1800"))
 AI_QUOTA_RETRY_SECONDS = int(os.getenv("AI_QUOTA_RETRY_SECONDS", "86400"))
 STAGE_QUOTA_EXHAUSTED = "quota_exhausted"
+STAGE_HERMES_SESSION_UNAVAILABLE = "hermes_session_unavailable"
+STAGE_INTERRUPTED = "interrupted"
 if HERMES_TIMEOUT_SECONDS <= 0:
     raise ValueError("HERMES_TIMEOUT_SECONDS precisa ser maior que zero.")
 if AI_QUOTA_RETRY_SECONDS <= 0:
@@ -30,6 +32,13 @@ def run_stage(label, command, failures, timeout=None):
         return True
     except subprocess.CalledProcessError as error:
         if (
+            error.returncode == 130
+            and len(command) > 1
+            and Path(command[1]).name == "wrapper.py"
+        ):
+            print(f"[!] Avaliação interrompida pelo operador em {label}.")
+            return STAGE_INTERRUPTED
+        if (
             error.returncode == 75
             and len(command) > 1
             and Path(command[1]).name == "wrapper.py"
@@ -40,6 +49,18 @@ def run_stage(label, command, failures, timeout=None):
             )
             failures.append(f"{label} (cota de IA)")
             return STAGE_QUOTA_EXHAUSTED
+        if (
+            error.returncode == 76
+            and len(command) > 1
+            and Path(command[1]).name == "wrapper.py"
+        ):
+            print(
+                f"[!] Hermes não conseguiu coordenar as sessões em {label}; "
+                "as demais avaliações serão interrompidas nesta execução. "
+                "Verifique o registro de sessões ativas no container."
+            )
+            failures.append(f"{label} (coordenação de sessão Hermes)")
+            return STAGE_HERMES_SESSION_UNAVAILABLE
         print(f"[!] Falha em {label}: {error}")
         failures.append(label)
         return False
@@ -110,12 +131,21 @@ def run_pipeline():
                 )
                 continue
             print(f"\n[+] Avaliando vaga ID: {short_id}...")
-            result = run_stage(
-                f"Avaliação da vaga {short_id}",
-                [VENV_PYTHON, str(WRAPPER_SCRIPT), str(file_path), "--defer-notifications"],
-                failures,
-                timeout=HERMES_TIMEOUT_SECONDS + 120,
-            )
+            try:
+                result = run_stage(
+                    f"Avaliação da vaga {short_id}",
+                    [VENV_PYTHON, str(WRAPPER_SCRIPT), str(file_path), "--defer-notifications"],
+                    failures,
+                    timeout=HERMES_TIMEOUT_SECONDS + 120,
+                )
+            except KeyboardInterrupt:
+                interruption = "Avaliação interrompida pelo operador (Ctrl+C)."
+                store.mark_evaluation_failed(short_id, interruption, DB_PATH)
+                print(
+                    f"\n[!] {interruption} A vaga foi devolvida à fila com "
+                    "retentativa agendada e a lease liberada."
+                )
+                return 130
             if result == STAGE_QUOTA_EXHAUSTED:
                 store.mark_evaluation_failed(
                     short_id,
@@ -124,6 +154,22 @@ def run_pipeline():
                     retry_after_seconds=AI_QUOTA_RETRY_SECONDS,
                 )
                 break
+            if result == STAGE_HERMES_SESSION_UNAVAILABLE:
+                store.mark_evaluation_failed(
+                    short_id,
+                    "Hermes não conseguiu ler o registro de sessões ativas; "
+                    "verifique o runtime do container.",
+                    DB_PATH,
+                )
+                break
+            if result == STAGE_INTERRUPTED:
+                interruption = "Avaliação interrompida pelo operador (Ctrl+C)."
+                store.mark_evaluation_failed(short_id, interruption, DB_PATH)
+                print(
+                    f"[!] {interruption} A vaga foi devolvida à fila com "
+                    "retentativa agendada e a lease liberada."
+                )
+                return 130
             if not result:
                 store.mark_evaluation_failed(
                     short_id,
