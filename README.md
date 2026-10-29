@@ -113,6 +113,7 @@ $$\text{Total Score} = \text{Role Match (35)} + \text{Skills (25)} + \text{Senio
 
 5. **Telegram Notifications:**
 * Stores recommended alerts in a SQLite outbox in the same transaction as the evaluation. Alerts use Telegram `sendMessage`; failed deliveries remain pending and are retried with exponential backoff.
+* When a Hermes evaluation attempt fails, the pipeline sends one Telegram message summarizing the failed evaluation(s) and the number of jobs still pending. Configure `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` in the server's private `.env`; if delivery fails, the pipeline logs the error and exits unsuccessfully. Normal jobs waiting for their retry backoff do not generate repeated alerts on every run.
 
 
 

@@ -200,6 +200,21 @@ def run_pipeline():
         )
         failures.append("Vagas pendentes de avaliação")
 
+    evaluation_failures = [
+        failure
+        for failure in failures
+        if failure.startswith("Avaliação da vaga ")
+    ]
+    if evaluation_failures:
+        print("\n[!] Enviando alerta Telegram sobre falha(s) de avaliação.")
+        from telegram_notify import send_pipeline_error_alert
+        try:
+            send_pipeline_error_alert(evaluation_failures, pending_evaluations)
+            print("[+] Alerta de falha de avaliação enviado ao Telegram.")
+        except (RuntimeError, ValueError, OSError) as error:
+            print(f"[!] Não foi possível enviar o alerta de falha ao Telegram: {error}")
+            failures.append("Alerta de falha de avaliação no Telegram")
+
     print("\n=== 7. ENVIANDO NOTIFICAÇÕES PENDENTES ===")
     from telegram_notify import deliver_pending_notifications
     if deliver_pending_notifications(DB_PATH):

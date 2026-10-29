@@ -98,6 +98,42 @@ def _send_telegram_request(request):
     return True
 
 
+def send_pipeline_error_alert(evaluation_failures, pending_count):
+    """Send one Telegram alert summarizing evaluation failures in this run."""
+    token = os.getenv("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
+
+    if not token:
+        raise RuntimeError("TELEGRAM_TOKEN não configurado.")
+    if not chat_id:
+        raise RuntimeError("TELEGRAM_CHAT_ID não configurado.")
+
+    details = [
+        html.escape(str(failure), quote=True)
+        for failure in evaluation_failures[:12]
+    ]
+    if len(evaluation_failures) > len(details):
+        details.append(f"… e mais {len(evaluation_failures) - len(details)} falha(s)")
+
+    message = (
+        "🚨 <b>Vargas não conseguiu avaliar uma ou mais vagas</b>\n\n"
+        "A execução da pipeline encontrou falha durante a avaliação:\n"
+        + "\n".join(f"• {detail}" for detail in details)
+        + f"\n\n<b>Vagas ainda pendentes:</b> {max(0, int(pending_count))}"
+        + "\nAs vagas permanecem salvas e serão retentadas conforme o backoff."
+    )
+    api_url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    request_data = urllib.parse.urlencode(payload).encode("utf-8")
+    request = urllib.request.Request(api_url, data=request_data)
+    return _send_telegram_request(request)
+
+
 def deliver_pending_notifications(db_path):
     import store
 
