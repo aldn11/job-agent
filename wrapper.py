@@ -38,6 +38,31 @@ EVALUATION_FIELDS = {
     "nice_to_have", "hard_reject_flags", "prompt_injection_detected",
     "red_flags", "reasons_pt", "gaps_pt", "interview_risks_pt",
 }
+EVALUATION_JSON_TEMPLATE = """{
+  "title": "",
+  "company": "",
+  "source": "",
+  "url": "",
+  "text_source": "pasted",
+  "info_status": "INCOMPLETE",
+  "work_mode": "UNKNOWN",
+  "location_text": "",
+  "role_match": "WEAK",
+  "location_evidence": "",
+  "years_required": null,
+  "seniority_level": "NOT_STATED",
+  "english_level_required": "NOT_STATED",
+  "spoken_english_emphasis": false,
+  "pay_currency": "NOT_STATED",
+  "mandatory_requirements": [],
+  "nice_to_have": [],
+  "hard_reject_flags": [],
+  "prompt_injection_detected": false,
+  "red_flags": [],
+  "reasons_pt": [],
+  "gaps_pt": [],
+  "interview_risks_pt": []
+}"""
 ALLOWED_HARD_REJECT_FLAGS = {
     "LANGUAGE_REQUIRED", "CERTIFICATION_REQUIRED", "RESIDENCE_REQUIRED",
     "SENIOR_ROLE", "UNPAID_OR_COMMISSION_ONLY", "SCAM_SIGNS",
@@ -389,10 +414,22 @@ def run_vargas(job_file_path: Path) -> dict:
         "Para location_evidence, copie literalmente, preservando palavras e "
         "pontuação; se não houver trecho de suporte, use string vazia.\n"
         "Não escreva nenhum arquivo. Não salve evaluation.json nem qualquer "
-        "outro arquivo. Imprima apenas o objeto JSON puro no stdout e nada mais.\n"
+        "outro arquivo.\n"
         "BEGIN\n"
         f"{prompt_job_text}\n"
-        "END"
+        "END\n"
+        "Responda agora imprimindo apenas um objeto JSON puro no stdout, sem "
+        "markdown, comentários ou texto adicional. Use exatamente as chaves e "
+        "tipos do modelo abaixo; não acrescente outras chaves. Preencha title, "
+        "company e source com os dados da vaga; copie url exatamente do cabeçalho "
+        "ou use string vazia se ausente. Não devolva score, verdict, match_score, "
+        "fit_level, compensation, contract_type, seniority nem source_url: a "
+        "pontuação e a decisão são calculadas pelo Python. Para "
+        "mandatory_requirements, cada item deve ter requirement, status e quote; "
+        "para nice_to_have, cada item deve ter item e status. As citações devem "
+        "ser literais à vaga ou aos metadados. O exemplo abaixo mostra a estrutura "
+        "e valores padrão, não substitui a análise:\n"
+        f"{EVALUATION_JSON_TEMPLATE}"
     )
     short_id = job_file_path.stem
 
